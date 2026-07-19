@@ -21,6 +21,7 @@ import wx
 from quill_social import __title__, __version__, paths
 from quill_social import a11y as a11y_mod
 from quill_social import keymap as keymap_mod
+from quill_social.adapters import oauth
 from quill_social.adapters.base import AdapterError
 from quill_social.adapters.github import MockGitHub
 from quill_social.adapters.registry import adapter_for
@@ -344,7 +345,7 @@ class SocialFrame(wx.Frame):
         """
         pulled = 0
         for acct in self.store.list_accounts(include_paused=False):
-            adapter = adapter_for(acct)
+            adapter = self._resolve_adapter(acct.account_id)
             try:
                 for it in adapter.home_timeline(limit=60):
                     it.account_id = acct.account_id
@@ -722,7 +723,7 @@ class SocialFrame(wx.Frame):
         acct = self.store.get_account(item.account_id)
         if acct and column in ("favourited", "bookmarked", "reblogged"):
             try:
-                adapter = adapter_for(acct)
+                adapter = self._resolve_adapter(acct.account_id)
                 {"favourited": adapter.set_favourite,
                  "bookmarked": adapter.set_bookmark,
                  "reblogged": adapter.set_reblog}[column](item.remote_id, new_value)
@@ -1119,58 +1120,263 @@ class HelpDialog(wx.Dialog):
         self.SetSize((560, 520))
 
 
+# Common Mastodon instances offered in the Add Account picker. The field is an
+# editable combo box, so this is a convenience list, not a restriction -- type
+# any server. Grows over time.
+INSTANCE_PRESETS = [
+    "caneandable.social",
+    "leaseysocial.com",
+    "mastodon.online",
+    "mastodon.social",
+    "tweesecake.social",
+]
+
+_NETWORK_GUIDANCE = {
+    "mastodon": (
+        "Mastodon: pick or type your server, then choose Sign in with browser. "
+        "Your browser opens the server's approval page; approve access, copy the "
+        "code it shows, paste it below, and choose Finish sign-in. No app setup "
+        "needed."
+    ),
+    "bluesky": (
+        "Bluesky: set the server to bsky.social (or your PDS) and your full "
+        "handle (for example name.bsky.social). Choose Open app password page, "
+        "create an app password, and paste it below -- not your main password."
+    ),
+    "mock": (
+        "Mock: a local demo network. No server or credential is needed; it is "
+        "for trying the app offline."
+    ),
+}
+
+_BLUESKY_APP_PASSWORDS_URL = "https://bsky.app/settings/app-passwords"
+
+
 class AddAccountDialog(wx.Dialog):
-    """Collect the minimum to register an account (PRD 11.1)."""
+    """Add an account with an in-app OAuth browser sign-in (PRD 11.1, 31.1).
+
+    Mastodon uses the accessible out-of-band OAuth flow: Sign in with browser
+    registers the app with the server (once, cached), opens the approval page,
+    and -- after you paste the code -- exchanges it for an access token. Bluesky
+    uses an app password. Either way the secret goes to the OS credential vault,
+    never the database, and Verify connection tests it before you commit.
+    """
 
     def __init__(self, parent):
-        super().__init__(parent, title="Add Account")
+        super().__init__(parent, title="Add Account",
+                         style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+        self._frame = parent
+        self._oauth: tuple[str, str, str] | None = None  # instance, client_id, secret
+        self._token = ""  # access token obtained via OAuth
+
         sizer = wx.BoxSizer(wx.VERTICAL)
-        sizer.Add(wx.StaticText(self, label="Network:"), 0, wx.ALL, 6)
+
+        sizer.Add(wx.StaticText(self, label="&Network:"), 0, wx.LEFT | wx.TOP, 6)
         self.network = wx.Choice(self, choices=["mastodon", "bluesky", "mock"])
         self.network.SetName("Network")
         self.network.SetSelection(0)
         sizer.Add(self.network, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 6)
-        sizer.Add(wx.StaticText(self, label="Handle:"), 0, wx.ALL, 6)
+
+        sizer.Add(wx.StaticText(self, label="&Server / instance:"),
+                  0, wx.LEFT | wx.TOP, 6)
+        self.instance = wx.ComboBox(
+            self, value=INSTANCE_PRESETS[0], choices=INSTANCE_PRESETS,
+            style=wx.CB_DROPDOWN)
+        self.instance.SetName("Server or instance")
+        sizer.Add(self.instance, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 6)
+
+        sizer.Add(wx.StaticText(self, label="&Handle:"), 0, wx.LEFT | wx.TOP, 6)
         self.handle = wx.TextCtrl(self)
         self.handle.SetName("Handle")
         sizer.Add(self.handle, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 6)
+
+        # OAuth row: sign-in button, code entry, finish button.
+        self.signin_btn = wx.Button(self, label="&Sign in with browser")
+        sizer.Add(self.signin_btn, 0, wx.LEFT | wx.RIGHT | wx.TOP, 6)
+
+        sizer.Add(wx.StaticText(self, label="Authorization &code (from the browser):"),
+                  0, wx.LEFT | wx.TOP, 6)
+        crow = wx.BoxSizer(wx.HORIZONTAL)
+        self.code = wx.TextCtrl(self)
+        self.code.SetName("Authorization code")
+        self.code.Enable(False)
+        crow.Add(self.code, 1, wx.RIGHT, 6)
+        self.finish_btn = wx.Button(self, label="&Finish sign-in")
+        self.finish_btn.Enable(False)
+        crow.Add(self.finish_btn, 0)
+        sizer.Add(crow, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 6)
+
         sizer.Add(wx.StaticText(
-            self, label="Instance (Mastodon) or service (Bluesky):"), 0, wx.ALL, 6)
-        self.instance = wx.TextCtrl(self)
-        self.instance.SetName("Instance or service")
-        sizer.Add(self.instance, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 6)
-        sizer.Add(wx.StaticText(
-            self, label="Access token / app password (optional):"), 0, wx.ALL, 6)
+            self, label="Or paste an access &token / app password:"),
+            0, wx.LEFT | wx.TOP, 6)
         self.secret = wx.TextCtrl(self, style=wx.TE_PASSWORD)
         self.secret.SetName("Access token or app password")
         sizer.Add(self.secret, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 6)
-        note = wx.StaticText(
-            self, label="The secret is stored in the operating system credential "
-            "vault, never in the database. Live sign-in activates when the "
-            "network client library is installed; otherwise the account is "
-            "registered locally and used with the demo network.")
-        note.Wrap(380)
-        sizer.Add(note, 0, wx.ALL, 6)
+
+        self.guidance = wx.StaticText(self, label=_NETWORK_GUIDANCE["mastodon"])
+        self.guidance.SetName("Guidance")
+        self.guidance.Wrap(430)
+        sizer.Add(self.guidance, 0, wx.ALL, 6)
+
+        vrow = wx.BoxSizer(wx.HORIZONTAL)
+        self.verify_btn = wx.Button(self, label="&Verify connection")
+        vrow.Add(self.verify_btn, 0, wx.RIGHT, 8)
+        self.status = wx.StaticText(self, label="")
+        self.status.SetName("Status")
+        vrow.Add(self.status, 1, wx.ALIGN_CENTER_VERTICAL)
+        sizer.Add(vrow, 0, wx.EXPAND | wx.ALL, 6)
+
         sizer.Add(self.CreateButtonSizer(wx.OK | wx.CANCEL),
                   0, wx.ALIGN_RIGHT | wx.ALL, 8)
-        self.SetSizerAndFit(sizer)
+        self.SetSizer(sizer)
+        self.SetSize((480, 560))
+
+        self.network.Bind(wx.EVT_CHOICE, self._on_network)
+        self.signin_btn.Bind(wx.EVT_BUTTON, self._on_signin)
+        self.finish_btn.Bind(wx.EVT_BUTTON, self._on_finish)
+        self.verify_btn.Bind(wx.EVT_BUTTON, self._on_verify)
+
+    # -- state helpers --------------------------------------------------------
+
+    def _temp_account(self) -> Account:
+        return Account(
+            network=self.network.GetStringSelection(),
+            handle=self.handle.GetValue().strip(),
+            display_name=self.handle.GetValue().strip(),
+            instance=self.instance.GetValue().strip(),
+        )
+
+    def _effective_secret(self) -> str:
+        """The OAuth token if we have one, else whatever was pasted."""
+        return self._token or self.secret.GetValue().strip()
+
+    def _set_status(self, text: str) -> None:
+        self.status.SetLabel(text)
+        self.Layout()
+
+    def _on_network(self, _e) -> None:
+        net = self.network.GetStringSelection()
+        self.guidance.SetLabel(_NETWORK_GUIDANCE.get(net, ""))
+        self.guidance.Wrap(430)
+        self._oauth = None
+        self._token = ""
+        self.code.SetValue("")
+        self.code.Enable(False)
+        self.finish_btn.Enable(False)
+        self._set_status("")
+        if net == "mastodon":
+            self.signin_btn.SetLabel("&Sign in with browser")
+            self.signin_btn.Enable(True)
+            if self.instance.GetValue() in ("", "bsky.social"):
+                self.instance.SetValue(INSTANCE_PRESETS[0])
+        elif net == "bluesky":
+            self.signin_btn.SetLabel("Open app &password page")
+            self.signin_btn.Enable(True)
+            self.instance.SetValue("bsky.social")
+        else:
+            self.signin_btn.SetLabel("&Sign in with browser")
+            self.signin_btn.Enable(False)
+        self.Layout()
+
+    # -- OAuth flow -----------------------------------------------------------
+
+    def _on_signin(self, _e) -> None:
+        net = self.network.GetStringSelection()
+        if net == "bluesky":
+            webbrowser.open(_BLUESKY_APP_PASSWORDS_URL)
+            self._set_status(
+                "Opened Bluesky app passwords. Create one and paste it below "
+                "with your handle.")
+            return
+        if net != "mastodon":
+            self._set_status("This network needs no browser sign-in.")
+            return
+        instance = self.instance.GetValue().strip()
+        if not instance:
+            self._set_status("Enter your Mastodon server first.")
+            return
+        self._set_status(f"Registering with {instance}...")
+        wx.SafeYield(self)
+        try:
+            client_id, client_secret = oauth.register_app(
+                instance, self._frame.data_dir)
+            url = oauth.auth_url(instance, client_id, client_secret)
+        except Exception as exc:  # noqa: BLE001 - report any server/client failure
+            self._set_status(f"Sign-in could not start: {exc}")
+            return
+        self._oauth = (instance, client_id, client_secret)
+        webbrowser.open(url)
+        self.code.Enable(True)
+        self.finish_btn.Enable(True)
+        self.code.SetFocus()
+        self._set_status(
+            "Browser opened. Approve access, copy the code it shows, paste it in "
+            "the Authorization code field, and choose Finish sign-in.")
+
+    def _on_finish(self, _e) -> None:
+        if not self._oauth:
+            self._set_status("Choose Sign in with browser first.")
+            return
+        code = self.code.GetValue().strip()
+        if not code:
+            self._set_status("Paste the authorization code from the browser.")
+            return
+        instance, client_id, client_secret = self._oauth
+        self._set_status("Exchanging the code for an access token...")
+        wx.SafeYield(self)
+        try:
+            self._token = oauth.exchange_code(
+                instance, client_id, client_secret, code)
+        except Exception as exc:  # noqa: BLE001 - surface auth failures to the user
+            self._set_status(f"Could not get a token: {exc}")
+            return
+        self._set_status(
+            "Signed in. Choose Verify connection to test it, or OK to add the "
+            "account.")
+
+    def _on_verify(self, _e) -> None:
+        """Test the credential against the live network without persisting it."""
+        net = self.network.GetStringSelection()
+        if net == "mock":
+            self._set_status("Mock network needs no credential.")
+            return
+        secret = self._effective_secret()
+        if not secret:
+            self._set_status("Sign in, or paste a token / app password first.")
+            return
+        if net == "bluesky" and not self.handle.GetValue().strip():
+            self._set_status("Bluesky needs your handle to sign in.")
+            return
+        tmp = InMemoryCredentialStore()
+        acct = self._temp_account()
+        tmp.store(net, acct.account_id, secret)
+        self._set_status("Connecting...")
+        wx.SafeYield(self)
+        try:
+            adapter = adapter_for(acct, tmp)
+            items = adapter.home_timeline(limit=1)
+            self._set_status(
+                f"Connected to {net}. Fetched {len(items)} post(s). "
+                "Choose OK to add the account.")
+        except AdapterError as exc:
+            self._set_status(f"Could not connect: {exc}")
+        except Exception as exc:  # noqa: BLE001 - surface any client error to the user
+            self._set_status(f"Connection error: {exc}")
 
     def run_and_apply(self, frame) -> None:
-        if self.ShowModal() == wx.ID_OK and self.handle.GetValue().strip():
-            acct = Account(
-                network=self.network.GetStringSelection(),
-                handle=self.handle.GetValue().strip(),
-                display_name=self.handle.GetValue().strip(),
-                instance=self.instance.GetValue().strip(),
-            )
+        net = self.network.GetStringSelection()
+        if self.ShowModal() == wx.ID_OK and (
+            self.handle.GetValue().strip() or self.instance.GetValue().strip()):
+            acct = self._temp_account()
             frame.store.put_account(acct)
             frame.caps.seed_from_network(acct.account_id, acct.network)
-            secret = self.secret.GetValue().strip()
-            if secret:
+            secret = self._effective_secret()
+            if secret and net != "mock":
                 try:
                     frame.credentials.store(acct.network, acct.account_id, secret)
                     frame.announcer.say(
-                        f"Added {acct.label}; credential stored securely.", "normal")
+                        f"Added {acct.label}; credential stored securely. "
+                        "Press F5 to refresh.", "normal")
                 except Exception:
                     frame.announcer.say(
                         f"Added {acct.label}; could not store the credential.",
