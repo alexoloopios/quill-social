@@ -150,6 +150,9 @@ class SocialFrame(wx.Frame):
         self._closing = False
         self._marker_pending = {}
         self._marker_running = False
+        self._pending_reactions = set()
+        self._seen_notification_ids = {}
+        self._announcement_ready = set()
 
         self._first_run_seed()
         self._load_caps()
@@ -182,6 +185,9 @@ class SocialFrame(wx.Frame):
         self._marker_timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self._flush_home_markers, self._marker_timer)
         self._marker_timer.Start(1500)
+        self._announcement_timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, self._poll_announcements, self._announcement_timer)
+        self._announcement_timer.Start(60_000)
         if self.a11y.focus_posts_on_startup:
             wx.CallAfter(self._restore_reading_position)
         self.Centre()
@@ -840,7 +846,15 @@ class SocialFrame(wx.Frame):
 
     # -- data loading ---------------------------------------------------------
 
-    def _refresh_from_network(self, *, announce: bool = True) -> None:
+    def _poll_announcements(self, event=None) -> None:
+        if self._closing or self._refresh_running:
+            return
+        enabled = any(self.a11y.account_options.get(account.account_id, {}).get("speech_timelines")
+                      for account in self.store.list_accounts(include_paused=False))
+        if enabled:
+            self._refresh_from_network(announce=False, automatic=True)
+
+    def _refresh_from_network(self, *, announce: bool = True, automatic: bool = False) -> None:
         """Pull each active account's home timeline into the local store.
 
         Failures are per-account and never crash the app or block other
@@ -855,28 +869,37 @@ class SocialFrame(wx.Frame):
         sync_accounts = [account.account_id for account in accounts
                          if self.a11y.account_options.get(account.account_id, {}).get("sync_home_position")]
         if all(account.network == "mock" for account in accounts):
-            self._apply_refresh(fetch_accounts(accounts, self.credentials, limit=limit), announce=announce)
+            self._apply_refresh(fetch_accounts(accounts, self.credentials, limit=limit),
+                                announce=announce, automatic=automatic)
             return
         self._refresh_running = True
-        self.announcer.say("Loading account timelines…", "normal")
+        if announce:
+            self.announcer.say("Loading account timelines…", "normal")
         credentials = self.credentials
 
         def worker():
             result = fetch_accounts(accounts, credentials, limit=limit, sync_accounts=sync_accounts)
             if not self._closing:
-                wx.CallAfter(self._finish_refresh, result, announce)
+                wx.CallAfter(self._finish_refresh, result, announce, automatic)
 
         Thread(target=worker, daemon=True, name="social-refresh").start()
 
-    def _apply_refresh(self, result, *, announce: bool) -> None:
+    def _apply_refresh(self, result, *, announce: bool, automatic: bool = False) -> None:
+        existing = {(item.account_id, item.remote_id) for item in self.store.list_items(limit=-1)}
+        new_items = []
         for item in result.items:
+            key = (item.account_id, item.remote_id)
+            if key not in existing:
+                new_items.append(item)
+                existing.add(key)
             self.store.upsert_item(item)
+        self._announce_updates(result, new_items, enabled=announce or automatic)
         if result.errors:
             self.announcer.error("\n".join(result.errors))
         elif announce:
             self.announcer.say(f"Refreshed. {result.posts} posts.", "normal")
 
-    def _finish_refresh(self, result, announce: bool) -> None:
+    def _finish_refresh(self, result, announce: bool, automatic: bool = False) -> None:
         if self._closing:
             return
         self._refresh_running = False
@@ -889,7 +912,7 @@ class SocialFrame(wx.Frame):
                 existing.add(key)
             self.store.upsert_item(item)
         if not self.current_scope.startswith(("pub:", "gh:")):
-            self._load_scope(self.current_scope, self.current_scope_label, keep_selection=True)
+            self._load_scope(self.current_scope, self.current_scope_label, keep_selection=True, announce=announce)
         # A remote marker only restores selection when the user has not started reading.
         marker = result.home_positions.get(self.selected_account_id)
         if marker and self.current_scope == "home:all" and not self._marker_pending:
@@ -901,19 +924,56 @@ class SocialFrame(wx.Frame):
             self.announcer.error("\n".join(result.errors))
         elif announce:
             self.announcer.say(f"Refreshed. {result.posts} posts.", "normal")
-        if announce:
-            from quill_social.reading_options import automatic_text
-            for item in new_items:
-                options = self.a11y.account_options.get(item.account_id, {})
-                scopes = options.get("speech_timelines", [])
-                notification = (item.account_id, item.remote_id) in result.notification_keys
-                eligible = ("home:all" in scopes or (notification and "attention:notifications" in scopes)
-                            or (self._mentions_account(item) and "attention:mentions" in scopes))
-                if eligible and not options.get("speech_muted", False):
-                    self.announcer.say(automatic_text(item, self.a11y), "normal")
+        self._announce_updates(result, new_items, enabled=announce or automatic)
         if self._refresh_pending:
             self._refresh_pending = False
             self._refresh_from_network()
+
+    def _announce_updates(self, result, new_items, *, enabled):
+        from quill_social.reading_options import automatic_text
+        accounts = {account.account_id: account for account in self.store.list_accounts()}
+        messages = []
+        spoken_posts = set()
+        focus = wx.Window.FindFocus()
+        foreground = bool(self.IsActive() and focus and (focus == self or self.IsDescendant(focus)))
+
+        def speak(item, account_id, scope, event=None):
+            options = self.a11y.account_options.get(account_id, {})
+            account = accounts.get(account_id)
+            if (not enabled or account_id not in self._announcement_ready or not account
+                    or account.paused or options.get("speech_muted", False)
+                    or scope not in options.get("speech_timelines", [])):
+                return False
+            messages.append(automatic_text(item, self.a11y, scope=scope, notification=event,
+                                          account_label=account.label, account_count=len(accounts),
+                                          active_account_context=foreground and self.selected_account_id == account_id))
+            return True
+
+        for event in sorted(result.events, key=lambda event: event.created_at):
+            seen = self._seen_notification_ids.setdefault(event.account_id, set())
+            if event.notification_id in seen:
+                continue
+            seen.add(event.notification_id)
+            scopes = self.a11y.account_options.get(event.account_id, {}).get("speech_timelines", [])
+            scope = ("attention:mentions" if event.kind in {"mention", "reply"}
+                     and "attention:mentions" in scopes else "attention:notifications")
+            if speak(event.item, event.account_id, scope, event) and event.item and event.kind in {"mention", "reply"}:
+                spoken_posts.add((event.account_id, event.item.remote_id))
+        for item in sorted(new_items, key=lambda item: item.created_at):
+            key = (item.account_id, item.remote_id)
+            if key in spoken_posts or (result.home_keys and key not in result.home_keys):
+                continue
+            if key in result.notification_keys and key not in result.home_keys:
+                continue
+            speak(item, item.account_id, "home:all")
+        self._announcement_ready.update(result.successful_accounts)
+        # Limit event history while retaining all IDs in the latest refresh window.
+        for account_id, seen in self._seen_notification_ids.items():
+            if len(seen) > 2000:
+                self._seen_notification_ids[account_id] = {
+                    event.notification_id for event in result.events if event.account_id == account_id}
+        if messages:
+            self.announcer.say("\n".join(messages), "automatic", interrupt=False)
 
     def _mentions_account(self, item) -> bool:
         import re
@@ -1349,19 +1409,60 @@ class SocialFrame(wx.Frame):
             self.announcer.error("Select a post first.")
             return
         new_value = not getattr(item, column)
+        key = (item.item_id, column)
+        if key in self._pending_reactions:
+            self.announcer.say(f"{verb} is already in progress.", "action")
+            return
+        acct = self.store.get_account(item.account_id)
+        if column == "flagged":
+            self._finish_reaction(item, column, new_value, None)
+            return
+        if not acct:
+            self.announcer.error("The account for this post is no longer available.")
+            return
+        self._pending_reactions.add(key)
+        credentials = self.credentials
+        def operation():
+            error = None
+            try:
+                adapter = adapter_for(acct, credentials)
+                method = {"favourited": "set_favourite", "bookmarked": "set_bookmark",
+                          "reblogged": "set_reblog"}[column]
+                getattr(adapter, method)(item.remote_id, new_value)
+            except Exception as exc:
+                error = str(exc) or type(exc).__name__
+            return error
+        if acct.network == "mock":
+            self._finish_reaction(item, column, new_value, operation())
+        else:
+            def worker():
+                error = operation()
+                if not self._closing:
+                    wx.CallAfter(self._finish_reaction, item, column, new_value, error)
+            Thread(target=worker, daemon=True, name="social-reaction").start()
+
+    def _finish_reaction(self, item, column, new_value, error) -> None:
+        if self._closing:
+            return
+        self._pending_reactions.discard((item.item_id, column))
+        if error:
+            label = {"favourited": "favourite", "reblogged": "repost", "bookmarked": "bookmark"}[column]
+            self.announcer.error(f"Could not {label} this post: {error}")
+            return
+        if not self.store.get_item(item.item_id):
+            return
         self.store.set_flag(item.item_id, column, new_value)
         setattr(item, column, new_value)
-        acct = self.store.get_account(item.account_id)
-        if acct and column in ("favourited", "bookmarked", "reblogged"):
-            try:
-                adapter = self._resolve_adapter(acct.account_id)
-                {"favourited": adapter.set_favourite,
-                 "bookmarked": adapter.set_bookmark,
-                 "reblogged": adapter.set_reblog}[column](item.remote_id, new_value)
-            except AdapterError:
-                pass
-        state = "on" if new_value else "off"
-        self.announcer.say(f"{verb} {state}.", "normal")
+        for visible in self._items:
+            if visible.item_id == item.item_id:
+                setattr(visible, column, new_value)
+        message = {
+            "favourited": ("Favourite removed.", "Favourited."),
+            "reblogged": ("Repost removed.", "Reposted."),
+            "bookmarked": ("Bookmark removed.", "Bookmarked."),
+            "flagged": ("Follow-up flag removed.", "Flagged for follow-up."),
+        }[column][int(new_value)]
+        self.announcer.say(message, "action", interrupt=True)
 
     def cmd_favourite(self) -> None:
         self._toggle_flag("favourited", "Favourite")
@@ -1715,6 +1816,7 @@ class SocialFrame(wx.Frame):
             logging.getLogger(__name__).exception("Could not save reading position")
         self._closing = True
         self._marker_timer.Stop()
+        self._announcement_timer.Stop()
         self._global_hotkeys.close()
         self._tray.RemoveIcon()
         self._tray.Destroy()

@@ -46,6 +46,19 @@ class AdapterError(Exception):
 
 
 @dataclass
+class NotificationEvent:
+    """A network notification, distinct from the post it concerns."""
+
+    notification_id: str
+    kind: str
+    actor_name: str
+    item: SocialItem | None = None
+    account_id: str = ""
+    actor_handle: str = ""
+    created_at: int = 0
+
+
+@dataclass
 class PublishRequest:
     """Everything one adapter needs to publish one post (PRD 15, 16.2)."""
 
@@ -85,6 +98,14 @@ class NetworkAdapter(ABC):
     @abstractmethod
     def notifications(self, *, limit: int = 40) -> list[SocialItem]:
         """Items that mention or involve the account."""
+
+    def notification_events(self, *, limit: int = 40) -> list[NotificationEvent]:
+        """Compatibility for adapters that expose only notification posts."""
+        return [NotificationEvent(
+            notification_id=item.remote_id, kind="mention", actor_name=item.author_display,
+            item=item, account_id=item.account_id, actor_handle=item.author_handle,
+            created_at=item.created_at,
+        ) for item in self.notifications(limit=limit)]
 
     @abstractmethod
     def thread(self, item: SocialItem) -> list[SocialItem]:

@@ -37,6 +37,7 @@ from typing import Any
 from quill_social.adapters.base import (
     AdapterError,
     NetworkAdapter,
+    NotificationEvent,
     PublishRequest,
     PublishResult,
 )
@@ -323,16 +324,30 @@ class MastodonAdapter(NetworkAdapter):
             raise _mastodon_error(exc) from exc
 
     def notifications(self, *, limit: int = 40) -> list[SocialItem]:
+        return [event.item for event in self.notification_events(limit=limit)
+                if event.item is not None]
+
+    def notification_events(self, *, limit: int = 40) -> list[NotificationEvent]:
         client = self._require_client()
         try:
             notes = client.notifications(limit=limit)
         except Exception as exc:  # noqa: BLE001
             raise _mastodon_error(exc) from exc
-        out: list[SocialItem] = []
+        out: list[NotificationEvent] = []
         for note in notes or []:
-            status = note.get("status") if isinstance(note, dict) else None
-            if isinstance(status, dict):
-                out.append(_status_to_item(status, account_id=self._account_id))
+            if not isinstance(note, dict):
+                continue
+            status = note.get("status")
+            actor = note.get("account") or {}
+            out.append(NotificationEvent(
+                notification_id=str(note.get("id") or ""),
+                kind=note.get("type") or "unknown",
+                actor_name=actor.get("display_name") or "",
+                actor_handle=_acct_handle(actor), account_id=self._account_id,
+                created_at=_to_ms(note.get("created_at")),
+                item=(_status_to_item(status, account_id=self._account_id)
+                      if isinstance(status, dict) else None),
+            ))
         return out
 
     def thread(self, item: SocialItem) -> list[SocialItem]:

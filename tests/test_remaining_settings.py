@@ -54,11 +54,11 @@ def test_automatic_notification_text_respects_reading_options():
                       content_warning="Sensitive")
     settings = A11ySettings(account_options={"a": {"content_warning_mode": "text_only"}},
                             exclude_web_addresses=True, notification_first_sentence=True, remove_unicode=True)
-    spoken = automatic_text(item, settings)
+    spoken = automatic_text(item, settings, scope="attention:notifications")
     assert "Renee:" in spoken and "cafe" in spoken
     assert "Later" not in spoken and "https" not in spoken and "Sensitive" not in spoken
     settings.account_options["a"]["content_warning_mode"] = "warning_only"
-    assert automatic_text(item, settings) == "Renee: Sensitive"
+    assert automatic_text(item, settings, scope="attention:notifications") == "New notification from Renee: Content warning: Sensitive"
 
 
 def test_clear_cache_preserves_saved_posts_local_work_other_accounts_and_drafts(store):

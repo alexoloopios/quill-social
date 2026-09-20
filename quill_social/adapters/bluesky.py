@@ -38,6 +38,7 @@ from typing import Any
 from quill_social.adapters.base import (
     AdapterError,
     NetworkAdapter,
+    NotificationEvent,
     PublishRequest,
     PublishResult,
 )
@@ -300,17 +301,43 @@ class BlueskyAdapter(NetworkAdapter):
         ]
 
     def notifications(self, *, limit: int = 40) -> list[SocialItem]:
+        return [event.item for event in self.notification_events(limit=limit)
+                if event.item is not None]
+
+    def notification_events(self, *, limit: int = 40) -> list[NotificationEvent]:
         client = self._require_client()
-        getter = getattr(client, "get_notifications", None)
         try:
-            resp = getter() if getter is not None else client.get_timeline(limit=limit)
+            resp = client.app.bsky.notification.list_notifications({"limit": min(limit, 100)})
         except Exception as exc:  # noqa: BLE001
             raise _bluesky_error(exc) from exc
-        notes = _attr(resp, "notifications", None)
-        if notes is not None:
-            return [_post_to_item(_as_dict(n), account_id=self._account_id) for n in notes]
-        feed = _attr(resp, "feed", []) or []
-        return [_feedview_to_item(_as_dict(fv), account_id=self._account_id) for fv in feed]
+        notes = [_as_dict(note) for note in _attr(resp, "notifications", []) or []]
+        # Reactions contain a like/repost record, not the post's content.
+        subjects = list(dict.fromkeys(
+            note.get("reason_subject") for note in notes
+            if note.get("reason_subject") and note.get("reason") in {"like", "repost"}
+        ))
+        posts = {}
+        for start in range(0, len(subjects), 25):
+            try:
+                response = client.get_posts(subjects[start:start + 25])
+            except Exception:
+                # Deleted/private posts must not discard the notification itself.
+                continue
+            for post in _attr(response, "posts", []) or []:
+                mapped = _as_dict(post)
+                posts[mapped.get("uri")] = mapped
+        events = []
+        for note in notes:
+            reason = note.get("reason") or "unknown"
+            actor = note.get("author") or {}
+            post = note if reason in {"mention", "reply", "quote"} else posts.get(note.get("reason_subject"))
+            events.append(NotificationEvent(
+                notification_id=note.get("uri") or "", kind=reason,
+                actor_name=actor.get("display_name") or "", actor_handle=_handle(actor),
+                account_id=self._account_id, created_at=_to_ms(note.get("indexed_at")),
+                item=_post_to_item(post, account_id=self._account_id) if post else None,
+            ))
+        return events
 
     def thread(self, item: SocialItem) -> list[SocialItem]:
         client = self._require_client()
@@ -364,7 +391,16 @@ class BlueskyAdapter(NetworkAdapter):
             if on:
                 getattr(client, on_method)(remote_id, self._cid_for(remote_id))
             else:
-                getattr(client, off_method)(remote_id)
+                response = client.get_posts([remote_id])
+                post = next((_as_dict(post) for post in _attr(response, "posts", []) or []
+                             if _attr(post, "uri") == remote_id), None)
+                if post is None:
+                    raise AdapterError("The post could not be found.", kind="validation")
+                record_uri = (post.get("viewer") or {}).get(on_method)
+                if record_uri:
+                    result = getattr(client, off_method)(record_uri)
+                    if result is False:
+                        raise AdapterError("The interaction could not be removed.")
         except AdapterError:
             raise
         except Exception as exc:  # noqa: BLE001

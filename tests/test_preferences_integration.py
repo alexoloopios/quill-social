@@ -30,14 +30,14 @@ def test_automatic_announcements_are_new_only_and_honor_account_mute(frame, monk
                       text="First sentence. Second sentence.")
     result = RefreshResult(items=[item], posts=1)
     frame._finish_refresh(result, True)
-    assert "Writer: First sentence." in spoken
+    assert any("New home post from Writer: First sentence. Second sentence." in text for text in spoken)
     spoken.clear()
     frame._finish_refresh(result, True)
-    assert not any(text.startswith("Writer:") for text in spoken)
+    assert not any("from Writer:" in text for text in spoken)
     frame.a11y.account_options[account.account_id]["speech_muted"] = True
     frame._finish_refresh(RefreshResult(items=[SocialItem(account_id=account.account_id,
                                                         remote_id="speech-muted", author_display="Muted")]), True)
-    assert not any(text.startswith("Muted:") for text in spoken)
+    assert not any("from Muted:" in text for text in spoken)
 
 
 def test_home_export_unlimited_does_not_drop_last_item(frame):

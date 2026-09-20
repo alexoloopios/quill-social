@@ -75,7 +75,7 @@ class BehaviorPanel(ScrolledPanel):
         for name, label in (
             ("open_single_link_without_dialog", "Open a single link without showing the links list"),
             ("remove_unicode", "Remove emojis and non-ASCII characters from post rows and display names"),
-            ("notification_first_sentence", "Read only the first sentence in new-item announcements"),
+            ("notification_first_sentence", "Read only the first sentence in notification announcements"),
             ("focus_posts_on_startup", "Restore last account and timeline, and focus posts on startup"),
             ("minimize_to_tray", "Minimize to system tray"),
         ):

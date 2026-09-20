@@ -129,7 +129,7 @@ controls into the fork:
   run in the background, and do not move focus away from the control in use.
 - **Behavior and cache:** open single links directly or use a chooser; optionally
   strip emojis/non-ASCII characters from reading rows; shorten automatic
-  announcements to one sentence; restore the last account/timeline/post at
+  notification announcements to one sentence; restore the last account/timeline/post at
   startup; minimize to the system tray; and set server-fetch/display limits.
   Cache clearing retains saved, flagged, favourited and annotated posts, drafts,
   and scheduled work. Multiple links always use a chooser.
@@ -141,6 +141,21 @@ controls into the fork:
 Screen-reader navigation remains available when automatic announcements are
 muted. Presentation filters do not change stored post text or exports. Sounds
 and soundpacks remain deferred.
+
+Favourites, reposts and bookmarks announce their completed action (for example,
+"Favourited" or "Repost removed") after the server accepts it. Failures are
+announced without changing the local state. These explicit confirmations remain
+audible at minimal verbosity. Windows installations include `accessible-output2`
+for supported screen readers, with system speech fallback; messages also appear
+in the status bar.
+
+When automatic announcements are enabled, Quill checks for updates every minute
+while open. It skips the initial history, announces each notification once,
+and queues incoming messages without stealing focus. In the active account it
+reads "from [author]: [post]"; elsewhere it uses "New home post from" or
+"New mention from", with the account name when needed. Notifications identify
+who favourited, boosted or followed. The first-sentence option shortens
+notification details only, leaving ordinary Home posts complete.
 
 Adding an account selects it and loads its timeline automatically. Live refresh
 runs in the background; failures are reported without preventing other accounts
