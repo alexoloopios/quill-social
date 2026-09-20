@@ -1,6 +1,6 @@
 """QUILL Social desktop shell -- accessible three-pane UI (PRD 9, 10, 29).
 
-Navigation tree | item list | details. Every pane is a named region, focus
+Account list + navigation tree | item list | details. Every pane is a named region, focus
 moves predictably and is never stolen by a background refresh (PRD 28.3), and
 every action is reachable by keyboard, menu, and the command center (PRD 3.2).
 Up/Down move between items; Left/Right read the configured fields of the
@@ -14,7 +14,7 @@ the engine onto ``quill.ui.app_shell.AppShellFrame`` (PRD 44).
 from __future__ import annotations
 
 import webbrowser
-from datetime import UTC
+from threading import Thread
 
 import wx
 
@@ -39,9 +39,11 @@ from quill_social.services import ecosystem as ecosystem_svc
 from quill_social.services import smartfolder as smartfolder_svc
 from quill_social.services.ai import accessibility as ai_a11y
 from quill_social.services.ai import understand as ai_understand
+from quill_social.services.refresh import fetch_accounts
 from quill_social.services.scheduler import Scheduler
 from quill_social.services.thread_publisher import publish_thread
 from quill_social.services.thread_splitter import mastodon_counter, split_thread
+from quill_social.time_display import format_timestamp
 from quill_social.ui.announce import Announcer
 from quill_social.ui.commands import Command, CommandPalette
 from quill_social.ui.composer import ComposerDialog
@@ -111,6 +113,10 @@ class SocialFrame(wx.Frame):
 
         self.current_scope = "home:all"
         self.current_scope_label = "Unified Home"
+        self.selected_account_id: str | None = None
+        self._updating_navigation = False
+        self._refresh_running = False
+        self._refresh_pending = False
         self.last_search = ""
         self._items: list = []
         self._field_index = 0
@@ -120,6 +126,7 @@ class SocialFrame(wx.Frame):
         self._load_caps()
         self._build_menu()
         self._build_ui()
+        self._populate_accounts()
         a11y_mod.apply_to_frame(self, self.a11y)
         self._refresh_from_network(announce=False)
         self._populate_nav()
@@ -267,10 +274,15 @@ class SocialFrame(wx.Frame):
         splitter = wx.SplitterWindow(self, style=wx.SP_LIVE_UPDATE | wx.SP_3D)
         splitter.SetMinimumPaneSize(180)
 
-        # Left: navigation tree.
+        # Left: a flat account selector, followed by that account's navigation.
         left = wx.Panel(splitter)
         lsz = wx.BoxSizer(wx.VERTICAL)
-        lsz.Add(wx.StaticText(left, label="Navigation"), 0, wx.ALL, 4)
+        lsz.Add(wx.StaticText(left, label="&Accounts"), 0, wx.ALL, 4)
+        self.accounts = wx.ListBox(left, style=wx.LB_SINGLE, size=(-1, 140))
+        self.accounts.SetName("Accounts")
+        lsz.Add(self.accounts, 0, wx.EXPAND | wx.ALL, 4)
+        self.navigation_label = wx.StaticText(left, label="Navigation — Unified Home")
+        lsz.Add(self.navigation_label, 0, wx.ALL, 4)
         self.nav = wx.TreeCtrl(
             left, style=wx.TR_HAS_BUTTONS | wx.TR_HIDE_ROOT | wx.TR_SINGLE
             | wx.TR_LINES_AT_ROOT | wx.TR_FULL_ROW_HIGHLIGHT)
@@ -312,27 +324,86 @@ class SocialFrame(wx.Frame):
         splitter.SplitVertically(left, right, 240)
 
         self.nav.Bind(wx.EVT_TREE_SEL_CHANGED, self._on_nav_changed)
+        self.nav.Bind(wx.EVT_SET_FOCUS, self._on_navigation_focus)
+        self.accounts.Bind(wx.EVT_LISTBOX, self._on_account_changed)
         self.list.Bind(wx.EVT_LIST_ITEM_SELECTED, self._on_item_selected)
         self.list.Bind(wx.EVT_LIST_ITEM_FOCUSED, self._on_item_selected)
         self.search.Bind(wx.EVT_TEXT_ENTER, lambda _e: self._run_search())
 
+    def _populate_accounts(self) -> None:
+        accounts = self.store.list_accounts()
+        self._account_ids = [None] + [account.account_id for account in accounts]
+        self.accounts.Set(["Unified Home"] + [
+            f"{account.label} ({account.network})" + (" — paused" if account.paused else "")
+            for account in accounts
+        ])
+        if self.selected_account_id not in self._account_ids:
+            self.selected_account_id = None
+        self.accounts.SetSelection(self._account_ids.index(self.selected_account_id))
+
+    def _on_account_changed(self, event) -> None:
+        if self._closing:
+            return
+        index = self.accounts.GetSelection()
+        if index == wx.NOT_FOUND:
+            return
+        self._select_account(self._account_ids[index], announce=False)
+
+    def _select_account(self, account_id: str | None, *, announce: bool = True) -> None:
+        self.selected_account_id = account_id
+        index = self._account_ids.index(account_id)
+        if self.accounts.GetSelection() != index:
+            self.accounts.SetSelection(index)
+        self.current_scope = "home:all"
+        self._populate_nav()
+        self._load_scope("home:all", "Home" if account_id else "Unified Home", announce=announce)
+
     def _populate_nav(self) -> None:
-        self.nav.DeleteAllItems()
-        root = self.nav.AddRoot("root")
-        self._nav_nodes = {}
-        first_child = None
-        for label, scope, children in NAV_TREE:
-            parent = self.nav.AppendItem(root, label)
-            self.nav.SetItemData(parent, (scope, label))
-            for clabel, cscope in children:
-                node = self.nav.AppendItem(parent, clabel)
-                self.nav.SetItemData(node, (cscope, clabel))
-                self._nav_nodes[cscope] = node
-                if first_child is None:
-                    first_child = node
-            self.nav.Expand(parent)
-        if first_child:
-            self.nav.SelectItem(first_child)
+        # The destinations are stable across accounts. Rebuilding and selecting
+        # native tree items here steals focus from the Accounts list on Windows.
+        self._updating_navigation = True
+        try:
+            if not getattr(self, "_nav_nodes", None):
+                root = self.nav.AddRoot("root")
+                self._nav_nodes = {}
+                for label, scope, children in NAV_TREE:
+                    parent = self.nav.AppendItem(root, label)
+                    self.nav.SetItemData(parent, (scope, label))
+                    for clabel, cscope in children:
+                        node = self.nav.AppendItem(parent, clabel)
+                        self.nav.SetItemData(node, (cscope, clabel))
+                        self._nav_nodes[cscope] = node
+                    if scope == "home":
+                        self.nav.Expand(parent)
+            home_label = "Home" if self.selected_account_id else "Unified Home"
+            home = self._nav_nodes["home:all"]
+            self.nav.SetItemText(home, home_label)
+            self.nav.SetItemData(home, ("home:all", home_label))
+            account = self.store.get_account(self.selected_account_id) if self.selected_account_id else None
+            context = account.label if account else "Unified Home"
+            self.navigation_label.SetLabel(f"Navigation — {context}")
+            self.nav.SetName(f"Navigation for {context}")
+            self._pending_nav_scope = self.current_scope
+        finally:
+            self._updating_navigation = False
+        if self.FindFocus() is self.nav:
+            self._sync_navigation_selection()
+
+    def _sync_navigation_selection(self) -> None:
+        scope = getattr(self, "_pending_nav_scope", None)
+        self._pending_nav_scope = None
+        if scope not in self._nav_nodes:
+            return
+        self._updating_navigation = True
+        try:
+            self.nav.SelectItem(self._nav_nodes[scope])
+        finally:
+            self._updating_navigation = False
+
+    def _on_navigation_focus(self, event) -> None:
+        # Native selection may take focus: do it only after the user arrives.
+        self._sync_navigation_selection()
+        event.Skip()
 
     # -- data loading ---------------------------------------------------------
 
@@ -343,45 +414,69 @@ class SocialFrame(wx.Frame):
         accounts (PRD 32.3). Live adapters that are not wired report a clear
         state instead of an opaque error.
         """
-        pulled = 0
-        for acct in self.store.list_accounts(include_paused=False):
-            adapter = self._resolve_adapter(acct.account_id)
-            try:
-                for it in adapter.home_timeline(limit=60):
-                    it.account_id = acct.account_id
-                    self.store.upsert_item(it)
-                    pulled += 1
-                for it in adapter.notifications(limit=20):
-                    it.account_id = acct.account_id
-                    self.store.upsert_item(it)
-            except AdapterError as exc:
-                if announce:
-                    self.announcer.say(f"{acct.label}: {exc}", "normal")
-            except Exception as exc:  # pragma: no cover - defensive
-                if announce:
-                    self.announcer.say(f"{acct.label}: refresh failed ({exc})",
-                                       "normal")
-        if announce:
-            self.announcer.say(f"Refreshed. {pulled} posts.", "normal")
+        if self._refresh_running:
+            self._refresh_pending = True
+            return
+        accounts = self.store.list_accounts(include_paused=False)
+        if all(account.network == "mock" for account in accounts):
+            self._apply_refresh(fetch_accounts(accounts, self.credentials), announce=announce)
+            return
+        self._refresh_running = True
+        self.announcer.say("Loading account timelines…", "normal")
+        credentials = self.credentials
+
+        def worker():
+            result = fetch_accounts(accounts, credentials)
+            if not self._closing:
+                wx.CallAfter(self._finish_refresh, result, announce)
+
+        Thread(target=worker, daemon=True, name="social-refresh").start()
+
+    def _apply_refresh(self, result, *, announce: bool) -> None:
+        for item in result.items:
+            self.store.upsert_item(item)
+        if result.errors:
+            self.announcer.error("\n".join(result.errors))
+        elif announce:
+            self.announcer.say(f"Refreshed. {result.posts} posts.", "normal")
+
+    def _finish_refresh(self, result, announce: bool) -> None:
+        if self._closing:
+            return
+        self._refresh_running = False
+        for item in result.items:
+            self.store.upsert_item(item)
+        if not self.current_scope.startswith(("pub:", "gh:")):
+            self._load_scope(self.current_scope, self.current_scope_label, keep_selection=True)
+        # Keep errors visible after the row-count announcement.
+        if result.errors:
+            self.announcer.error("\n".join(result.errors))
+        elif announce:
+            self.announcer.say(f"Refreshed. {result.posts} posts.", "normal")
+        if self._refresh_pending:
+            self._refresh_pending = False
+            self._refresh_from_network()
 
     def _scope_items(self, scope: str) -> list:
+        def items(**filters):
+            return self.store.list_items(account_id=self.selected_account_id, limit=500, **filters)
         if scope == "home:all":
-            return self.store.list_items(limit=500)
+            return items()
         if scope == "home:unread":
-            return self.store.list_items(unread_only=True, limit=500)
+            return items(unread_only=True)
         if scope == "attention:mentions":
-            return [it for it in self.store.list_items(limit=500) if "@you" in it.text]
+            return [it for it in items() if "@you" in it.text]
         if scope == "attention:notifications":
-            return [it for it in self.store.list_items(limit=500)
+            return [it for it in items()
                     if "@you" in it.text or it.is_reply]
         if scope == "attention:flagged":
-            return self.store.list_items(flagged=True, limit=500)
+            return items(flagged=True)
         if scope == "library:bookmarks":
-            return self.store.list_items(bookmarked=True, limit=500)
+            return items(bookmarked=True)
         if scope == "library:favourites":
-            return self.store.list_items(favourited=True, limit=500)
+            return items(favourited=True)
         if scope == "discover:search":
-            return self.store.search_items(self.last_search) if self.last_search else []
+            return self.store.search_items(self.last_search, account_id=self.selected_account_id) if self.last_search else []
         if scope == "discover:catchup":
             return self._catchup_items()
         if scope.startswith("smart:"):
@@ -389,19 +484,23 @@ class SocialFrame(wx.Frame):
             folders = {f.folder_id: f for f in self.store.list_folders(kind="smart")}
             folder = folders.get(folder_id)
             if folder:
-                return smartfolder_svc.evaluate(self.store.list_items(limit=500),
-                                                folder.rule)
+                return smartfolder_svc.evaluate(items(), folder.rule)
         return []
 
     def _catchup_items(self) -> list:
-        items = self.store.list_items(limit=500)
+        items = self.store.list_items(account_id=self.selected_account_id, limit=500)
         items = catchup_svc.collapse_reposts(items)
         items = catchup_svc.collapse_cross_network(items)
         return items
 
-    def _load_scope(self, scope: str, label: str) -> None:
+    def _load_scope(self, scope: str, label: str, *, keep_selection: bool = False, announce: bool = True) -> None:
+        previous = self._current_item() if keep_selection else None
+        previous_id = previous.item_id if previous else None
+        field_index = self._field_index
         self.current_scope = scope
         self.current_scope_label = label
+        if not keep_selection:
+            self.details.Clear()
         if scope.startswith("pub:"):
             self._load_publishing(scope, label)
             return
@@ -409,16 +508,22 @@ class SocialFrame(wx.Frame):
             self._load_github(scope, label)
             return
         self._items = self._scope_items(scope)
-        self._render_list()
+        self._render_list(selected_item_id=previous_id)
+        selected = self._current_item()
+        if previous_id and selected and selected.item_id == previous_id:
+            self._field_index = field_index
         unread = sum(1 for it in self._items if not it.read)
-        self.announcer.say(f"{label}. {len(self._items)} items, {unread} unread.",
-                           "normal")
+        if announce:
+            self.announcer.say(f"{label}. {len(self._items)} items, {unread} unread.",
+                               "normal")
 
     def _load_publishing(self, scope: str, label: str) -> None:
         self.list.DeleteAllItems()
         self._items = []
         if scope == "pub:drafts":
             drafts = self.store.list_drafts()
+            if self.selected_account_id:
+                drafts = [d for d in drafts if not d.targets or self.selected_account_id in d.targets]
             for i, d in enumerate(drafts):
                 preview = (d.text[:80] or "(empty)").replace("\n", " ")
                 self.list.InsertItem(i, f"Draft: {preview}")
@@ -427,8 +532,10 @@ class SocialFrame(wx.Frame):
             return
         state = scope.split(":", 1)[1]
         plans = self.store.list_plans(state=state)
+        if self.selected_account_id:
+            plans = [p for p in plans if p.account_id == self.selected_account_id]
         for i, p in enumerate(plans):
-            when = _fmt_ms(p.scheduled_for) if p.scheduled_for else "now"
+            when = format_timestamp(p.scheduled_for, self.a11y.display_timezone) if p.scheduled_for else "now"
             self.list.InsertItem(
                 i, f"{p.network} -> {p.state}, {when}, retries {p.retry_count}")
         self.announcer.say(f"{label}. {len(plans)} items.", "normal")
@@ -470,8 +577,10 @@ class SocialFrame(wx.Frame):
             self.list.InsertItem(i, row)
         self.announcer.say(f"{label}. {len(objs)} items.", "normal")
 
-    def _render_list(self, *, keep_selection: bool = False) -> None:
-        sel = self.list.GetFirstSelected() if keep_selection else -1
+    def _render_list(self, *, keep_selection: bool = False, selected_item_id: str | None = None) -> None:
+        previous = self._current_item() if keep_selection else None
+        if previous is not None:
+            selected_item_id = previous.item_id
         self.list.DeleteAllItems()
         accounts = {a.account_id: a for a in self.store.list_accounts()}
         now = now_ms()
@@ -486,9 +595,11 @@ class SocialFrame(wx.Frame):
                 font.SetWeight(wx.FONTWEIGHT_BOLD)
                 self.list.SetItemFont(idx, font)
         if self._items:
-            target = sel if 0 <= sel < len(self._items) else 0
+            target = next((i for i, item in enumerate(self._items) if item.item_id == selected_item_id), 0)
             self.list.Select(target)
             self.list.Focus(target)
+        else:
+            self.details.Clear()
 
     # -- selection + field navigation -----------------------------------------
 
@@ -518,7 +629,7 @@ class SocialFrame(wx.Frame):
             f"Author: {item.author_display} {item.author_handle}",
             f"Network: {item.network}"
             + (f" ({acct.label})" if acct else ""),
-            f"When: {_fmt_ms(item.created_at)}",
+            f"When: {format_timestamp(item.created_at, self.a11y.display_timezone)}",
             f"Visibility: {item.visibility}",
         ]
         if item.content_warning:
@@ -547,7 +658,9 @@ class SocialFrame(wx.Frame):
         if item.missing_alt_count:
             lines.append(f"Accessibility: {item.missing_alt_count} media "
                          "without alt text.")
-        self.details.SetValue("\n".join(lines))
+        text = "\n".join(lines)
+        if self.details.GetValue() != text:
+            self.details.SetValue(text)
 
     def _announce_field(self, delta: int) -> None:
         item = self._current_item()
@@ -565,6 +678,12 @@ class SocialFrame(wx.Frame):
     # -- keyboard dispatch ----------------------------------------------------
 
     def _on_char_hook(self, event: wx.KeyEvent) -> None:
+        if event.GetKeyCode() == wx.WXK_F6:
+            panes = [self.accounts, self.nav, self.list, self.details]
+            focus = self.FindFocus()
+            index = panes.index(focus) if focus in panes else -1
+            panes[(index + (-1 if event.ShiftDown() else 1)) % len(panes)].SetFocus()
+            return
         # Field navigation only when the list has focus.
         if self.FindFocus() is self.list:
             code = event.GetKeyCode()
@@ -605,7 +724,7 @@ class SocialFrame(wx.Frame):
     # -- navigation events ----------------------------------------------------
 
     def _on_nav_changed(self, event) -> None:
-        if self._closing:
+        if self._closing or self._updating_navigation:
             return
         node = event.GetItem()
         try:
@@ -652,7 +771,8 @@ class SocialFrame(wx.Frame):
             return
         caps = {a.account_id: self.caps.get(a.account_id, a.network) for a in accounts}
         dlg = ComposerDialog(self, accounts, caps, store=self.store,
-                             reply_to=reply_to, quote_of=quote_of)
+                             reply_to=reply_to, quote_of=quote_of,
+                             selected_account_id=self.selected_account_id)
         self.announcer.say("Composer open. Editor has focus.", "normal")
         if dlg.ShowModal() == wx.ID_OK and dlg.result_draft:
             self._handle_compose_result(
@@ -676,7 +796,7 @@ class SocialFrame(wx.Frame):
                     tier="local", scheduled_for=when, state="scheduled"))
             self.announcer.say(
                 f"Scheduled for {len(draft.targets)} account(s) at "
-                f"{_fmt_ms(when)}. The local scheduler runs while the app is "
+                f"{format_timestamp(when, self.a11y.display_timezone)}. The local scheduler runs while the app is "
                 "open.", "normal")
             return
         # publish now
@@ -942,13 +1062,13 @@ class SocialFrame(wx.Frame):
     def cmd_where_am_i(self) -> None:
         item = self._current_item()
         idx = self.list.GetFirstSelected()
-        acct = None
+        acct = self.store.get_account(self.selected_account_id) if self.selected_account_id else None
         if item:
             acct = self.store.get_account(item.account_id)
         w = WhereAmI(
             workspace="Personal",
             account=acct.label if acct else "",
-            network=item.network if item else "",
+            network=item.network if item else (acct.network if acct else ""),
             feed=self.current_scope_label,
             position=idx + 1 if idx >= 0 else 0,
             total=len(self._items),
@@ -1033,7 +1153,13 @@ class SocialFrame(wx.Frame):
     # -- dialogs --------------------------------------------------------------
 
     def _on_add_account(self, _e) -> None:
-        AddAccountDialog(self).run_and_apply(self)
+        account = AddAccountDialog(self).run_and_apply(self)
+        if account is not None:
+            self._populate_accounts()
+            self._select_account(account.account_id)
+            self.accounts.SetFocus()
+            self._refresh_from_network()
+            self._load_scope(self.current_scope, self.current_scope_label)
 
     def _on_preferences(self, _e) -> None:
         PreferencesDialog(self, self.a11y).run_and_apply(self)
@@ -1099,6 +1225,9 @@ class HelpDialog(wx.Dialog):
         lines = [
             "QUILL Social -- keyboard guide",
             "",
+            "Accounts: Up/Down selects Unified Home or an account.",
+            "F6 / Shift+F6: move between Accounts, Navigation, Timeline and Details.",
+            "Navigation shows the selected account; expand a section with Right Arrow.",
             "Up/Down: previous/next post.",
             "Left/Right: read the previous/next field of the focused post.",
             "Enter: open the focused post in Details.",
@@ -1363,27 +1492,33 @@ class AddAccountDialog(wx.Dialog):
         except Exception as exc:  # noqa: BLE001 - surface any client error to the user
             self._set_status(f"Connection error: {exc}")
 
-    def run_and_apply(self, frame) -> None:
-        net = self.network.GetStringSelection()
+    def run_and_apply(self, frame) -> Account | None:
+        added = None
         if self.ShowModal() == wx.ID_OK and (
             self.handle.GetValue().strip() or self.instance.GetValue().strip()):
             acct = self._temp_account()
             frame.store.put_account(acct)
             frame.caps.seed_from_network(acct.account_id, acct.network)
             secret = self._effective_secret()
-            if secret and net != "mock":
+            if secret and acct.network != "mock":
                 try:
                     frame.credentials.store(acct.network, acct.account_id, secret)
-                    frame.announcer.say(
-                        f"Added {acct.label}; credential stored securely. "
-                        "Press F5 to refresh.", "normal")
+                    if isinstance(frame.credentials, InMemoryCredentialStore):
+                        frame.announcer.error(
+                            f"Added {acct.label} for this session only. Secure credential "
+                            "storage is unavailable; you will need to sign in again after closing."
+                        )
+                    else:
+                        frame.announcer.say(f"Added {acct.label}; credential stored securely.", "normal")
                 except Exception:
                     frame.announcer.say(
                         f"Added {acct.label}; could not store the credential.",
                         "normal")
             else:
                 frame.announcer.say(f"Added {acct.label}.", "normal")
+            added = acct
         self.Destroy()
+        return added
 
 
 class PreferencesDialog(wx.Dialog):
@@ -1393,6 +1528,11 @@ class PreferencesDialog(wx.Dialog):
         super().__init__(parent, title="Preferences")
         self._settings = settings
         sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(wx.StaticText(self, label="Display time &zone:"), 0, wx.ALL, 6)
+        self.display_timezone = wx.Choice(self, choices=["System timezone", "UTC"])
+        self.display_timezone.SetName("Display time zone")
+        self.display_timezone.SetSelection(1 if settings.display_timezone == "utc" else 0)
+        sizer.Add(self.display_timezone, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 6)
         sizer.Add(wx.StaticText(self, label="Announcement verbosity:"),
                   0, wx.ALL, 6)
         self.verbosity = wx.Choice(self, choices=["minimal", "normal", "verbose"])
@@ -1415,6 +1555,7 @@ class PreferencesDialog(wx.Dialog):
 
     def run_and_apply(self, frame) -> None:
         if self.ShowModal() == wx.ID_OK:
+            self._settings.display_timezone = "utc" if self.display_timezone.GetSelection() == 1 else "system"
             self._settings.verbosity = self.verbosity.GetStringSelection()
             self._settings.high_contrast = self.high_contrast.GetValue()
             self._settings.speak_network_prefix = self.speak_network.GetValue()
@@ -1422,7 +1563,7 @@ class PreferencesDialog(wx.Dialog):
             a11y_mod.save(frame.data_dir, self._settings)
             frame.announcer.set_verbosity(self._settings.verbosity)
             a11y_mod.apply_to_frame(frame, self._settings)
-            frame._render_list(keep_selection=True)
+            frame._load_scope(frame.current_scope, frame.current_scope_label, keep_selection=True)
             frame.announcer.say("Preferences saved.", "normal")
         self.Destroy()
 
@@ -1438,14 +1579,6 @@ def _make_credential_store():
     except Exception:
         pass
     return InMemoryCredentialStore()
-
-
-def _fmt_ms(ms: int | None) -> str:
-    if not ms:
-        return "unknown"
-    from datetime import datetime
-    return datetime.fromtimestamp(ms / 1000, tz=UTC).strftime(
-        "%Y-%m-%d %H:%M UTC")
 
 
 def run() -> int:

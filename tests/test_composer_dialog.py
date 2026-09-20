@@ -41,6 +41,19 @@ def _caps(accounts) -> dict[str, Capabilities]:
     return {a.account_id: Capabilities(network=a.network) for a in accounts}
 
 
+def test_selected_account_is_default_target_but_others_remain_available(app):
+    accounts = _accounts() + [Account(account_id="second", network="mock", handle="second")]
+    dialog = ComposerDialog(None, accounts, _caps(accounts), selected_account_id="second")
+    try:
+        assert dialog.accounts_box.GetCount() == 2
+        assert not dialog.accounts_box.IsChecked(0)
+        assert dialog.accounts_box.IsChecked(1)
+        dialog.accounts_box.Check(0, True)
+        assert dialog.accounts_box.IsChecked(0)
+    finally:
+        dialog.Destroy()
+
+
 def test_schedule_to_ms_helper():
     # 2030-01-02 03:04 UTC -> known epoch ms.
     assert schedule_to_ms("2030-01-02", "03:04") == 1893553440000

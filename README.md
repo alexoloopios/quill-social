@@ -41,12 +41,37 @@ Implemented as interfaces with deterministic defaults and an `available()` probe
 Requires Python 3.12+ and wxPython.
 
 ```
-pip install -e .
+pip install -e ".[networks,security]"
 quill-social            # launch the accessible shell
 run-quill-social.bat    # Windows: launch with a portable data folder
 ```
 
 The first launch seeds a demo account so the timeline is immediately usable. Use **File > Add Account** to register a Mastodon or Bluesky account (live sign-in lights up when the `networks` extra is installed).
+
+The Accounts list starts with **Unified Home**, followed by your accounts.
+Choose an account with Up/Down to show its Home and scope its navigation,
+cached posts, search results and publishing entries. Choose Unified Home to
+see all accounts again. Other navigation sections start collapsed; expand them
+with Right Arrow. All existing destinations, commands and tools remain available.
+GitHub and management tools retain their existing workspace-wide behavior.
+
+Adding an account selects it and loads its timeline automatically. Live refresh
+runs in the background; failures are reported without preventing other accounts
+from loading. The `security` extra supplies the OS credential backend. If it is
+unavailable, the app explicitly reports that sign-in lasts for the current session.
+The Windows batch launcher uses `.venv` when present, otherwise the default Python.
+
+This is the first gradual migration from the recovered client: account selection
+and usable sign-in/refresh, adapted to this repository's existing UI, services,
+adapters and database. Sounds and further recovered features are deferred.
+
+Displayed dates and times use your system timezone by default, including its
+daylight-saving rules. In **File > Preferences > Display time zone**, choose
+**System timezone** or **UTC**. The choice is saved and applies immediately to
+the main window and to subsequently opened dialogs. Relative times are unchanged.
+This is a display preference: composer scheduling inputs remain explicitly
+labelled UTC, queue schedules keep their own timezone, and stored posting times
+do not change.
 
 ### Headless CLI
 
@@ -74,9 +99,10 @@ quill-social-cli split "a long post..." --limit 300
 | Ctrl+Shift+C | Command center |
 | Ctrl+Shift+I | Where Am I |
 | F5 | Refresh |
+| F6 / Shift+F6 | Next / previous pane: Accounts, Navigation, Timeline, Details |
 | F1 | Help |
 
-All shortcuts are remappable (Preferences).
+Command shortcuts are remappable (Preferences); F6 provides pane navigation.
 
 ## Development
 

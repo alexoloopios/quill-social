@@ -493,15 +493,17 @@ class SocialStore:
                 (int(value), item_id),
             )
 
-    def search_items(self, query: str, *, limit: int = 200) -> list[SocialItem]:
+    def search_items(self, query: str, *, limit: int = 200, account_id: str | None = None) -> list[SocialItem]:
         """Full-text search over cached posts (PRD 26)."""
         q = _fts_query(query)
         if not q:
             return []
+        account_filter = " AND i.account_id=?" if account_id else ""
+        params = [q, account_id, limit] if account_id else [q, limit]
         rows = self.conn.execute(
-            """SELECT i.* FROM item_fts f JOIN items i ON i.item_id = f.item_id
-               WHERE item_fts MATCH ? ORDER BY i.created_at DESC LIMIT ?""",
-            (q, limit),
+            "SELECT i.* FROM item_fts f JOIN items i ON i.item_id = f.item_id "
+            f"WHERE item_fts MATCH ?{account_filter} ORDER BY i.created_at DESC LIMIT ?",
+            params,
         ).fetchall()
         return [SocialItem.from_row(dict(r)) for r in rows]
 

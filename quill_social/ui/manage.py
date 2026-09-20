@@ -32,6 +32,7 @@ from quill_social.services.moderation import Filter, MuteBlock
 from quill_social.services.notifications import CATEGORIES, NotificationPolicy
 from quill_social.services.outbox import CircuitBreaker, Outbox
 from quill_social.services.plugins import PluginManifest, PluginRegistry
+from quill_social.time_display import format_timestamp, preference_for
 
 # The management UI persists plugin manifests (identity + permissions) under its
 # own document kind; the registry itself only persists per-plugin state (PRD 34).
@@ -703,7 +704,7 @@ class OutboxDialog(wx.Dialog):
         for i, item in enumerate(self._items):
             self.item_list.InsertItem(i, item.account_id or "(none)")
             self.item_list.SetItem(i, 1, item.network)
-            self.item_list.SetItem(i, 2, _fmt_created(item.created))
+            self.item_list.SetItem(i, 2, format_timestamp(item.created, preference_for(self.GetParent())))
             self.item_list.SetItem(i, 3, item.send_mode)
             self.item_list.SetItem(i, 4, item.validation_status)
 
@@ -712,11 +713,3 @@ class OutboxDialog(wx.Dialog):
         if 0 <= idx < len(self._items):
             self.outbox.remove(self._items[idx].outbox_id)
             self.reload()
-
-
-def _fmt_created(ms: int) -> str:
-    if not ms:
-        return "unknown"
-    from datetime import UTC, datetime
-
-    return datetime.fromtimestamp(ms / 1000, tz=UTC).strftime("%Y-%m-%d %H:%M")

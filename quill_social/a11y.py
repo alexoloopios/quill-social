@@ -38,6 +38,7 @@ class A11ySettings:
     speak_network_prefix: bool = True
     speak_engagement: bool = False
     announce_read_state: bool = True
+    display_timezone: Literal["system", "utc"] = "system"
 
     @property
     def text_scale(self) -> float:
@@ -58,6 +59,7 @@ class A11ySettings:
         if not isinstance(idx, int) or not (0 <= idx < len(SCALE_STEPS)):
             idx = DEFAULT_SCALE_INDEX
         return cls(
+            display_timezone=d.get("display_timezone") if d.get("display_timezone") in ("system", "utc") else "system",
             verbosity=v,
             high_contrast=bool(d.get("high_contrast", False)),
             scale_index=idx,

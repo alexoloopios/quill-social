@@ -89,6 +89,7 @@ class ComposerDialog(wx.Dialog):
         reply_to=None,
         quote_of: str = "",
         now_ms: int | None = None,
+        selected_account_id: str | None = None,
     ):
         title = "Reply" if reply_to else "Compose"
         super().__init__(parent, title=title,
@@ -119,8 +120,10 @@ class ComposerDialog(wx.Dialog):
         self.accounts_box = wx.CheckListBox(
             self, choices=[f"{a.label} ({a.network})" for a in accounts])
         self.accounts_box.SetName("Target accounts")
+        target = reply_to.account_id if reply_to else selected_account_id
         for i, a in enumerate(accounts):
-            if a.is_default or len(accounts) == 1:
+            checked = a.account_id == target if target else (a.is_default or len(accounts) == 1)
+            if checked:
                 self.accounts_box.Check(i, True)
         outer.Add(self.accounts_box, 0, wx.EXPAND | wx.ALL, 8)
 

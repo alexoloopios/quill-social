@@ -13,10 +13,10 @@ speech. What is spoken is data, never color or position (PRD 6.5).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 
 from quill_social.a11y import A11ySettings
 from quill_social.model import Account, SocialItem
+from quill_social.time_display import display_datetime
 
 # Every field a row can expose (PRD 12.4), keyed by a stable id.
 AVAILABLE_FIELDS: dict[str, str] = {
@@ -69,7 +69,7 @@ class FieldProfile:
         return [f for f in self.order if f in AVAILABLE_FIELDS]
 
 
-def _rel_time(created_at: int, *, now: int | None = None) -> str:
+def _rel_time(created_at: int, *, now: int | None = None, timezone: str = "system") -> str:
     from quill_social.model import now_ms
 
     now = now if now is not None else now_ms()
@@ -85,7 +85,7 @@ def _rel_time(created_at: int, *, now: int | None = None) -> str:
     if delta < 604800:
         d = delta // 86400
         return f"{d} day{'s' if d != 1 else ''} ago"
-    dt = datetime.fromtimestamp(created_at / 1000, tz=UTC)
+    dt = display_datetime(created_at, timezone)
     return dt.strftime("%Y-%m-%d")
 
 
@@ -116,7 +116,7 @@ def field_value(
     if field_id == "text":
         return item.text.replace("\n", " ").strip()
     if field_id == "date":
-        return _rel_time(item.created_at, now=now)
+        return _rel_time(item.created_at, now=now, timezone=s.display_timezone)
     if field_id == "network":
         return item.network.capitalize()
     if field_id == "account":

@@ -104,3 +104,203 @@ def test_commands_report_unavailable_without_selection(app):
         assert cmds["compose"].is_available()
     finally:
         frame._on_close(None)
+
+
+def test_account_list_scopes_navigation_without_removing_features(app):
+    from quill_social.model import Account, Draft, PublicationPlan
+    from quill_social.ui.app import NAV_TREE, SocialFrame
+
+    frame = SocialFrame()
+    try:
+        frame.store.put_account(Account(account_id="second", network="mock", handle="@second"))
+        frame._populate_accounts()
+        frame._refresh_from_network(announce=False)
+        commands = {c.command_id for c in frame._build_commands()}
+        assert frame.accounts.GetString(0) == "Unified Home"
+        assert len(frame._scope_items("home:all")) == 30
+        frame.accounts.SetSelection(2)
+        event = wx.CommandEvent(wx.EVT_LISTBOX.typeId, frame.accounts.GetId())
+        frame.accounts.ProcessWindowEvent(event)
+        assert frame.selected_account_id == "second"
+        assert {it.account_id for it in frame._items} == {"second"}
+        assert frame.nav.GetItemText(frame._nav_nodes["home:all"]) == "Home"
+        assert set(frame._nav_nodes) == {scope for _, _, children in NAV_TREE for _, scope in children}
+        assert {c.command_id for c in frame._build_commands()} == commands
+
+        first = frame.store.list_items(account_id="acct_mock")[0]
+        second = frame._items[0]
+        for item in (first, second):
+            frame.store.set_flag(item.item_id, "bookmarked", True)
+        bookmarks = frame._scope_items("library:bookmarks")
+        assert second.item_id in {it.item_id for it in bookmarks}
+        assert {it.account_id for it in bookmarks} == {"second"}
+        frame.last_search = "the"
+        assert all(it.account_id == "second" for it in frame._scope_items("discover:search"))
+        frame.store.put_draft(Draft(text="first draft", targets=["acct_mock"]))
+        frame.store.put_draft(Draft(text="second draft", targets=["second"]))
+        frame._load_scope("pub:drafts", "Drafts")
+        assert [d.text for d in frame._draft_rows] == ["second draft"]
+        for draft in frame.store.list_drafts():
+            frame.store.put_plan(PublicationPlan(draft_id=draft.draft_id, account_id=draft.targets[0], state="failed"))
+        frame._load_scope("pub:failed", "Failed")
+        assert frame.list.GetItemCount() == 1
+        frame._select_account(None)
+        assert len(frame._items) == 30
+        assert frame.nav.GetItemText(frame._nav_nodes["home:all"]) == "Unified Home"
+        frame._load_scope("pub:failed", "Failed")
+        assert frame.list.GetItemCount() == 2
+    finally:
+        frame._on_close(None)
+
+
+def test_add_account_loads_posts_without_manual_refresh(app, monkeypatch):
+    import threading
+    import time
+
+    from quill_social.model import Account, SocialItem
+    from quill_social.security.credentials import InMemoryCredentialStore
+    from quill_social.services import refresh
+    from quill_social.ui.app import AddAccountDialog, SocialFrame
+
+    frame = SocialFrame()
+    frame.credentials = InMemoryCredentialStore()
+    account = Account(account_id="live", network="mastodon", handle="@person@example.test")
+    worker_threads = []
+
+    class Client:
+        def home_timeline(self, **kwargs):
+            worker_threads.append(threading.get_ident())
+            return [SocialItem(network="mastodon", remote_id="123", text="Loaded after sign-in")]
+
+        def notifications(self, **kwargs):
+            return []
+
+    def adapter(acct, credentials):
+        assert credentials.resolve(credentials.reference("mastodon", "live")) == "test-only-token"
+        return Client()
+
+    monkeypatch.setattr(refresh, "adapter_for", adapter)
+    monkeypatch.setattr(AddAccountDialog, "ShowModal", lambda self: wx.ID_OK)
+    monkeypatch.setattr(AddAccountDialog, "_temp_account", lambda self: account)
+    monkeypatch.setattr(AddAccountDialog, "_effective_secret", lambda self: "test-only-token")
+    try:
+        frame._on_add_account(None)
+        assert frame.selected_account_id == "live"
+        deadline = time.monotonic() + 5
+        while frame._refresh_running and time.monotonic() < deadline:
+            app.Yield()
+            time.sleep(0.01)
+        assert not frame._refresh_running
+        assert [it.text for it in frame._items] == ["Loaded after sign-in"]
+        assert worker_threads and all(t != threading.get_ident() for t in worker_threads)
+        assert frame.accounts.GetSelection() == frame._account_ids.index("live")
+        monkeypatch.setattr(AddAccountDialog, "ShowModal", lambda self: wx.ID_CANCEL)
+        before = len(frame.store.list_accounts())
+        frame._on_add_account(None)
+        assert len(frame.store.list_accounts()) == before
+    finally:
+        frame._on_close(None)
+
+
+def test_background_refresh_preserves_reading_position(app):
+    from quill_social.model import SocialItem, now_ms
+    from quill_social.services.refresh import RefreshResult
+    from quill_social.ui.app import SocialFrame
+
+    frame = SocialFrame()
+    try:
+        frame.list.Select(0, False)
+        frame.list.Select(5)
+        frame.list.Focus(5)
+        before = frame._current_item().item_id
+        frame._field_index = 2
+        frame.details.SetSelection(3, 10)
+        frame.details.SetFocus()
+        focus = frame.FindFocus()
+        fresh = SocialItem(account_id="acct_mock", remote_id="fresh", text="Newest post", created_at=now_ms() + 1000)
+        frame._finish_refresh(RefreshResult(items=[fresh], posts=1), True)
+        assert frame._current_item().item_id == before
+        assert frame._field_index == 2
+        assert frame.details.GetSelection() == (3, 10)
+        assert frame.FindFocus() is focus
+        assert not frame.store.get_item(fresh.item_id).read
+    finally:
+        frame._on_close(None)
+
+
+def test_account_navigation_never_transfers_keyboard_focus(app, monkeypatch):
+    from quill_social.model import Account
+    from quill_social.ui.app import SocialFrame
+
+    frame = SocialFrame()
+    try:
+        frame.store.put_account(Account(account_id="second", network="mock", handle="@second"))
+        frame._populate_accounts()
+        frame.Show()
+        frame.accounts.SetFocus()
+        app.Yield()
+        transfers = []
+        def focused(event):
+            transfers.append(event.GetEventObject())
+            event.Skip()
+        frame.nav.Bind(wx.EVT_SET_FOCUS, focused)
+        frame.list.Bind(wx.EVT_SET_FOCUS, focused)
+        nodes = dict(frame._nav_nodes)
+        announcements = []
+        monkeypatch.setattr(frame.announcer, "say", lambda text, *a, **k: announcements.append(text))
+        for index in (1, 2, 0, 2):
+            frame.accounts.SetSelection(index)
+            event = wx.CommandEvent(wx.EVT_LISTBOX.typeId, frame.accounts.GetId())
+            frame.accounts.ProcessWindowEvent(event)
+            app.Yield()
+            assert frame.FindFocus() is frame.accounts
+            assert not transfers
+            assert frame._nav_nodes == nodes
+        assert not announcements  # Native account selection should speak uninterrupted.
+        frame.nav.SetFocus()
+        app.Yield()
+        assert frame.nav.GetSelection() == frame._nav_nodes["home:all"]
+        frame.nav.SelectItem(frame._nav_nodes["library:bookmarks"])
+        assert frame.current_scope == "library:bookmarks"
+        frame.accounts.SetFocus()
+        app.Yield()
+        transfers.clear()
+        frame.accounts.SetSelection(1)
+        frame.accounts.ProcessWindowEvent(wx.CommandEvent(wx.EVT_LISTBOX.typeId, frame.accounts.GetId()))
+        app.Yield()
+        assert frame.FindFocus() is frame.accounts
+        assert not transfers
+        frame.nav.SetFocus()
+        app.Yield()
+        assert frame.nav.GetSelection() == frame._nav_nodes["home:all"]
+        assert frame.current_scope == "home:all"
+    finally:
+        frame._on_close(None)
+
+
+def test_display_timezone_preference_applies_immediately_and_cancel_keeps_value(app, monkeypatch):
+    from quill_social import a11y
+    from quill_social.time_display import format_timestamp
+    from quill_social.ui.app import PreferencesDialog, SocialFrame
+
+    frame = SocialFrame()
+    try:
+        assert frame.a11y.display_timezone == "system"
+        item_id = frame._current_item().item_id
+        dialog = PreferencesDialog(frame, frame.a11y)
+        assert dialog.display_timezone.GetSelection() == 0
+        dialog.display_timezone.SetSelection(1)
+        monkeypatch.setattr(dialog, "ShowModal", lambda: wx.ID_OK)
+        dialog.run_and_apply(frame)
+        assert frame.a11y.display_timezone == "utc"
+        assert a11y.load(frame.data_dir).display_timezone == "utc"
+        assert frame._current_item().item_id == item_id
+        assert f"When: {format_timestamp(frame._current_item().created_at, 'utc')}" in frame.details.GetValue()
+        dialog = PreferencesDialog(frame, frame.a11y)
+        dialog.display_timezone.SetSelection(0)
+        monkeypatch.setattr(dialog, "ShowModal", lambda: wx.ID_CANCEL)
+        dialog.run_and_apply(frame)
+        assert frame.a11y.display_timezone == "utc"
+        assert a11y.load(frame.data_dir).display_timezone == "utc"
+    finally:
+        frame._on_close(None)
