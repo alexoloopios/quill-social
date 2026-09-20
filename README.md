@@ -104,11 +104,43 @@ at startup, on preference changes and on exit. Restore validates a Quill Social
 backup, preserves a recovery copy and applies restored settings immediately.
 Recovered-client backup files use a different format and cannot be imported.
 
-Preferences now has General and Reading tabs. Reading controls include newest
+Preferences includes General and Reading tabs. Reading controls include newest
 posts at bottom, condensed leading mentions, hiding URLs from post rows,
 relative or absolute timestamps, a 12-hour clock for absolute times, and read
 state announcements. These presentation choices keep full post text available
 in View Post and exports.
+
+Additional Preferences pages port the recovered client's remaining non-sound
+controls into the fork:
+
+- **General / Manage Accounts:** change local aliases, choose a default posting
+  account, pause accounts, or remove an account with explicit confirmation.
+- **Composition:** word wrapping, separate reply recipients, Enter or Ctrl+Enter
+  to publish, and publish/boost confirmations. Ctrl+Enter is the default; with
+  Enter-to-send enabled, Shift+Enter inserts a newline. A declined publishing
+  confirmation saves the post as a draft.
+- **Timelines and fields:** per-account timeline names, order and visibility;
+  post-field order and visibility; and cached sources to combine in Home.
+  Duplicate posts appear once. Home remains available, and Advanced mode
+  retains its grouped navigation. Restore defaults is available per account.
+- **Account reading:** show post text, warning plus text, or only the content
+  warning; choose automatic new-item announcements and mute them per account;
+  optionally synchronize the Mastodon Home reading position. Marker requests
+  run in the background, and do not move focus away from the control in use.
+- **Behavior and cache:** open single links directly or use a chooser; optionally
+  strip emojis/non-ASCII characters from reading rows; shorten automatic
+  announcements to one sentence; restore the last account/timeline/post at
+  startup; minimize to the system tray; and set server-fetch/display limits.
+  Cache clearing retains saved, flagged, favourited and annotated posts, drafts,
+  and scheduled work. Multiple links always use a chooser.
+- **Shortcuts:** assign, clear and reset local shortcuts, plus optional global
+  shortcuts for showing Quill Social, composing, and refreshing. Conflicts are
+  reported; menu accelerators follow the saved mappings. Global shortcuts are
+  included in new settings backups; old backups preserve existing globals.
+
+Screen-reader navigation remains available when automatic announcements are
+muted. Presentation filters do not change stored post text or exports. Sounds
+and soundpacks remain deferred.
 
 Adding an account selects it and loads its timeline automatically. Live refresh
 runs in the background; failures are reported without preventing other accounts

@@ -9,12 +9,14 @@ be exercised without a modal loop.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 wx = pytest.importorskip("wx")
 
 from quill_social.capabilities import Capabilities  # noqa: E402
-from quill_social.model import Account, Media  # noqa: E402
+from quill_social.model import Account, Media, SocialItem  # noqa: E402
 from quill_social.ui import composer as composer_mod  # noqa: E402
 from quill_social.ui.composer import (  # noqa: E402
     ComposerDialog,
@@ -39,6 +41,90 @@ def _accounts() -> list[Account]:
 
 def _caps(accounts) -> dict[str, Capabilities]:
     return {a.account_id: Capabilities(network=a.network) for a in accounts}
+
+
+@pytest.mark.parametrize("separate", [False, True])
+def test_reply_recipients_are_included_in_draft_and_character_count(app, separate):
+    parent = wx.Frame(None)
+    parent.a11y = SimpleNamespace(separate_reply_recipients=separate)
+    accounts = _accounts()
+    reply = SocialItem(account_id="acct_1", remote_id="post", author_handle="friend@example.org")
+    dlg = ComposerDialog(parent, accounts, _caps(accounts), reply_to=reply)
+    try:
+        if separate:
+            assert dlg.editor.GetValue() == ""
+            assert dlg.reply_recipients.GetValue() == "@friend@example.org"
+            dlg.reply_recipients.SetValue("friend@example.org, @second@example.org")
+            dlg.editor.SetValue("Hello")
+            expected = "@friend@example.org @second@example.org Hello"
+        else:
+            assert dlg.reply_recipients is None
+            assert dlg.editor.GetValue() == "@friend@example.org "
+            dlg.editor.SetValue(dlg.editor.GetValue() + "Hello")
+            expected = "@friend@example.org Hello"
+        draft = dlg._build_draft()
+        assert draft.text == expected
+        assert draft.in_reply_to == "post"
+        dlg._refresh_report()
+        assert f"{len(expected)}/" in dlg.report.GetValue()
+    finally:
+        dlg.Destroy()
+        parent.Destroy()
+
+
+@pytest.mark.parametrize("ctrl_send", [False, True])
+@pytest.mark.parametrize("wrap", [False, True])
+def test_composition_keyboard_and_wrap_preferences(app, monkeypatch, ctrl_send, wrap):
+    parent = wx.Frame(None)
+    parent.a11y = SimpleNamespace(ctrl_enter_to_send=ctrl_send, composition_word_wrap=wrap)
+    accounts = _accounts()
+    dlg = ComposerDialog(parent, accounts, _caps(accounts))
+    try:
+        assert bool(dlg.editor.GetWindowStyleFlag() & wx.TE_DONTWRAP) is not wrap
+        actions = []
+        monkeypatch.setattr(dlg, "_finish", actions.append)
+        monkeypatch.setattr(wx.Window, "FindFocus", staticmethod(lambda: dlg.editor))
+        for control, shift, alt in ((False, False, False), (True, False, False),
+                                    (False, True, False), (True, True, False),
+                                    (False, False, True)):
+            event = wx.KeyEvent(wx.wxEVT_CHAR_HOOK)
+            event.KeyCode = wx.WXK_RETURN
+            event.SetControlDown(control)
+            event.SetShiftDown(shift)
+            event.SetAltDown(alt)
+            before = len(actions)
+            dlg._on_char_hook(event)
+            sends = control == ctrl_send and not shift and not alt
+            assert len(actions) == before + int(sends)
+            assert event.GetSkipped() is not sends
+        monkeypatch.setattr(wx.Window, "FindFocus", staticmethod(lambda: dlg.cw))
+        event = wx.KeyEvent(wx.wxEVT_CHAR_HOOK)
+        event.KeyCode = wx.WXK_RETURN
+        event.SetControlDown(ctrl_send)
+        before = len(actions)
+        dlg._on_char_hook(event)
+        assert len(actions) == before
+        assert event.GetSkipped()
+    finally:
+        dlg.Destroy()
+        parent.Destroy()
+
+
+def test_composition_preferences_panel_saves_each_setting(app):
+    from quill_social.ui.composition_preferences import CompositionPreferencesPanel
+    parent = wx.Frame(None)
+    settings = SimpleNamespace(composition_word_wrap=False, separate_reply_recipients=False,
+                               ctrl_enter_to_send=True, provide_confirmations=True)
+    panel = CompositionPreferencesPanel(parent, settings)
+    try:
+        for name in vars(settings):
+            control = getattr(panel, name)
+            control.SetValue(not getattr(settings, name))
+        panel.apply(settings)
+        assert vars(settings) == dict(composition_word_wrap=True, separate_reply_recipients=True,
+                                     ctrl_enter_to_send=False, provide_confirmations=False)
+    finally:
+        parent.Destroy()
 
 
 def test_selected_account_is_default_target_but_others_remain_available(app):

@@ -528,6 +528,20 @@ class SocialStore:
                 self.conn.execute("DELETE FROM items WHERE item_id=?", (iid,))
         return len(doomed)
 
+    def clear_timeline_cache(self, account_id: str | None = None) -> int:
+        """Clear disposable rows, preserving saved posts and posts carrying local work."""
+        where = "bookmarked=0 AND flagged=0 AND favourited=0 AND tags='[]' AND folders='[]'"
+        params = []
+        if account_id:
+            where += " AND account_id=?"
+            params.append(account_id)
+        where += " AND item_id NOT IN (SELECT target_id FROM notes)"
+        with self.conn:
+            ids = [row[0] for row in self.conn.execute(f"SELECT item_id FROM items WHERE {where}", params)]
+            self.conn.executemany("DELETE FROM item_fts WHERE item_id=?", [(iid,) for iid in ids])
+            self.conn.executemany("DELETE FROM items WHERE item_id=?", [(iid,) for iid in ids])
+        return len(ids)
+
     # -- drafts ---------------------------------------------------------------
 
     def put_draft(self, draft: Draft) -> Draft:

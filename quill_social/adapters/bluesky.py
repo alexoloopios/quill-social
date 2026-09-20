@@ -281,10 +281,20 @@ class BlueskyAdapter(NetworkAdapter):
     def home_timeline(self, *, limit: int = 40, since_id: str = "") -> list[SocialItem]:
         client = self._require_client()
         try:
-            resp = client.get_timeline(limit=limit)
+            resp = client.get_timeline(limit=min(limit, 100))
+            feed = list(_attr(resp, "feed", []) or [])
+            cursor = _attr(resp, "cursor", None)
+            seen_cursors = set()
+            while len(feed) < limit and cursor and cursor not in seen_cursors:
+                seen_cursors.add(cursor)
+                resp = client.get_timeline(limit=min(100, limit - len(feed)), cursor=cursor)
+                page = list(_attr(resp, "feed", []) or [])
+                if not page:
+                    break
+                feed.extend(page)
+                cursor = _attr(resp, "cursor", None)
         except Exception as exc:  # noqa: BLE001 -- normalized below
             raise _bluesky_error(exc) from exc
-        feed = _attr(resp, "feed", []) or []
         return [
             _feedview_to_item(_as_dict(fv), account_id=self._account_id) for fv in feed
         ]

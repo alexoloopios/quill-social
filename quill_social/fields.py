@@ -110,11 +110,16 @@ def field_value(
 ) -> str:
     """The spoken value of one field for one item. Empty string means omit."""
     s = settings or A11ySettings()
+    from quill_social.reading_options import plain_characters
+    warning_mode = s.account_options.get(item.account_id, {}).get("content_warning_mode", "warning_then_text")
     if field_id == "author":
-        return item.author_display or item.author_handle
+        author = item.author_display or item.author_handle
+        return plain_characters(author) if s.remove_unicode else author
     if field_id == "handle":
         return item.author_handle
     if field_id == "text":
+        if item.content_warning and warning_mode == "warning_only":
+            return ""
         text = item.text.replace("\n", " ").strip()
         if s.condense_mentions:
             leading = re.match(r"^(?:@[\w.-]+(?:@[\w.-]+)?\s+){2,}", text)
@@ -124,7 +129,7 @@ def field_value(
         if s.exclude_web_addresses:
             text = re.sub(r"https?://\S+", "", text)
             text = " ".join(text.split())
-        return text
+        return plain_characters(text) if s.remove_unicode else text
     if field_id == "date":
         if s.post_timestamps_relative:
             return _rel_time(item.created_at, now=now, timezone=s.display_timezone)
@@ -161,7 +166,10 @@ def field_value(
             return "all media described"
         return f"{missing} of {len(item.media)} missing alt text"
     if field_id == "content_warning":
-        return f"content warning: {item.content_warning}" if item.content_warning else ""
+        if warning_mode == "text_only":
+            return ""
+        warning = plain_characters(item.content_warning) if s.remove_unicode else item.content_warning
+        return f"content warning: {warning}" if warning else ""
     if field_id == "moderation":
         return ", ".join(item.moderation_labels)
     if field_id == "language":
@@ -194,7 +202,7 @@ def read_fields(
     nothing after it.
     """
     out: list[tuple[str, str]] = []
-    for fid in profile.enabled():
+    for fid in _ordered_fields(profile, item, settings or A11ySettings()):
         val = field_value(item, fid, account=account, settings=settings, now=now)
         if val:
             out.append((AVAILABLE_FIELDS[fid], val))
@@ -217,7 +225,7 @@ def render_row(
     """
     s = settings or A11ySettings()
     pieces: list[str] = []
-    for fid in profile.enabled():
+    for fid in _ordered_fields(profile, item, s):
         if fid == "network" and not s.speak_network_prefix:
             continue
         if fid == "engagement" and not s.speak_engagement:
@@ -226,3 +234,12 @@ def render_row(
         if val:
             pieces.append(val)
     return ". ".join(pieces)
+
+
+def _ordered_fields(profile, item, settings):
+    fields = profile.enabled()
+    mode = settings.account_options.get(item.account_id, {}).get("content_warning_mode", "warning_then_text")
+    if item.content_warning and mode == "warning_then_text" and "text" in fields and "content_warning" in fields:
+        fields.remove("content_warning")
+        fields.insert(fields.index("text"), "content_warning")
+    return fields

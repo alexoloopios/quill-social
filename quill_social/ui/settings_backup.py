@@ -7,7 +7,8 @@ import wx
 from quill_social.services.settings_backup import backup_directory, create_backup, restore_backup
 
 CONTENTS = (
-    "Backups contain Quill Social Preferences and keyboard shortcuts. "
+    "Backups contain Quill Social Preferences, keyboard shortcuts and global shortcuts. "
+    "Older backups without global shortcuts keep your current global shortcuts. "
     "They do not include accounts, sign-in credentials, posts, drafts, "
     "scheduled posts, templates, notification policies or other database settings. "
     "Backups from the recovered client cannot be imported."
@@ -41,7 +42,7 @@ def restore_settings_backup(parent, data_dir: str | Path) -> bool:
         wx.MessageBox(str(exc), "Cannot restore settings backup", wx.OK | wx.ICON_ERROR, parent)
         return False
     if wx.MessageBox(
-        f"{CONTENTS}\n\nReplace your current Preferences and keyboard shortcuts with this backup? "
+        f"{CONTENTS}\n\nReplace the Preferences and shortcuts included in this backup? "
         "A recovery backup of your current settings will be saved first.",
         "Restore Settings Backup", wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION, parent,
     ) != wx.YES:

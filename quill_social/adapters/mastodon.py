@@ -265,14 +265,35 @@ class MastodonAdapter(NetworkAdapter):
 
     def home_timeline(self, *, limit: int = 40, since_id: str = "") -> list[SocialItem]:
         client = self._require_client()
-        kwargs: dict[str, Any] = {"limit": limit}
+        kwargs: dict[str, Any] = {"limit": min(limit, 40)}
         if since_id:
             kwargs["since_id"] = since_id
         try:
-            statuses = client.timeline_home(**kwargs)
+            statuses = list(client.timeline_home(**kwargs) or [])
+            while len(statuses) < limit and statuses and len(statuses) % 40 == 0:
+                kwargs["max_id"] = statuses[-1]["id"]
+                kwargs["limit"] = min(40, limit - len(statuses))
+                page = list(client.timeline_home(**kwargs) or [])
+                seen = {str(status["id"]) for status in statuses}
+                page = [status for status in page if str(status["id"]) not in seen]
+                if not page:
+                    break
+                statuses.extend(page)
         except Exception as exc:  # noqa: BLE001 -- normalized below
             raise _mastodon_error(exc) from exc
         return [_status_to_item(s, account_id=self._account_id) for s in statuses or []]
+
+    def home_position(self) -> str:
+        try:
+            return str(self._require_client().markers_get("home").get("home", {}).get("last_read_id", ""))
+        except Exception as exc:
+            raise _mastodon_error(exc) from exc
+
+    def save_home_position(self, remote_id: str) -> None:
+        try:
+            self._require_client().markers_set("home", remote_id)
+        except Exception as exc:
+            raise _mastodon_error(exc) from exc
 
     def own_profile(self) -> dict:
         client = self._require_client()

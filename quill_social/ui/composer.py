@@ -97,6 +97,11 @@ class ComposerDialog(wx.Dialog):
                          style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         mode = ui_mode or getattr(getattr(parent, "a11y", None), "ui_mode", "standard")
         self.ui_mode = "advanced" if mode == "advanced" else "standard"
+        settings = getattr(parent, "a11y", None)
+        self.ctrl_enter_to_send = getattr(settings, "ctrl_enter_to_send", True)
+        self.composition_word_wrap = getattr(settings, "composition_word_wrap", False)
+        self.separate_reply_recipients = getattr(settings, "separate_reply_recipients", False)
+        self.reply_recipients = None
         self._accounts = accounts
         self._caps = caps
         self._store = store
@@ -201,6 +206,9 @@ class ComposerDialog(wx.Dialog):
             self.more_options.MoveAfterInTabOrder(cancel_btn)
 
         self.editor.Bind(wx.EVT_TEXT, lambda _e: self._refresh_report())
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_char_hook)
+        if self.reply_recipients is not None:
+            self.reply_recipients.Bind(wx.EVT_TEXT, lambda _e: self._refresh_report())
         self.cw.Bind(wx.EVT_TEXT, lambda _e: self._refresh_report())
         self.accounts_box.Bind(wx.EVT_CHECKLISTBOX, lambda _e: self._refresh_report())
         self.visibility.Bind(wx.EVT_CHOICE, lambda _e: self._refresh_report())
@@ -312,11 +320,30 @@ class ComposerDialog(wx.Dialog):
         self.poll_duration.Bind(wx.EVT_CHOICE, lambda _e: self._refresh_report())
 
     def _build_editor(self, outer: wx.Sizer) -> None:
+        recipient = getattr(self._reply_to, "author_handle", "").strip().lstrip("@")
+        prefix = f"@{recipient} " if recipient else ""
+        if self._reply_to and self.separate_reply_recipients:
+            outer.Add(wx.StaticText(self, label="Reply recipients:"), 0, wx.LEFT, 8)
+            self.reply_recipients = wx.TextCtrl(self, value=prefix.strip())
+            outer.Add(self.reply_recipients, 0, wx.EXPAND | wx.ALL, 8)
         outer.Add(wx.StaticText(self, label="Post text:"), 0, wx.LEFT, 8)
-        # Tab navigates to the next control; multiline Return still inserts a newline.
-        self.editor = wx.TextCtrl(self, style=wx.TE_MULTILINE)
+        style = wx.TE_MULTILINE
+        if not self.composition_word_wrap:
+            style |= wx.TE_DONTWRAP | wx.HSCROLL
+        self.editor = wx.TextCtrl(
+            self, value="" if self.reply_recipients is not None else prefix, style=style)
+        self.editor.SetInsertionPointEnd()
         self.editor.SetName("Post text")
         outer.Add(self.editor, 1, wx.EXPAND | wx.ALL, 8)
+
+    def _on_char_hook(self, event) -> None:
+        if (wx.Window.FindFocus() is self.editor
+                and event.GetKeyCode() in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER)
+                and not event.ShiftDown() and not event.AltDown()
+                and event.ControlDown() == self.ctrl_enter_to_send):
+            self._finish("publish")
+            return
+        event.Skip()
 
     def _build_visibility(self, outer: wx.Sizer) -> None:
         opt = wx.BoxSizer(wx.HORIZONTAL)
@@ -483,8 +510,16 @@ class ComposerDialog(wx.Dialog):
         )
 
     def _build_draft(self) -> Draft:
+        text = self.editor.GetValue()
+        if self.reply_recipients is not None:
+            recipients = " ".join(
+                "@" + name.lstrip("@")
+                for name in re.split(r"[\s,;]+", self.reply_recipients.GetValue().strip())
+                if name.lstrip("@"))
+            if recipients:
+                text = recipients + " " + text
         return Draft(
-            text=self.editor.GetValue(),
+            text=text,
             targets=self._selected_account_ids(),
             visibility=self.visibility.GetStringSelection() or "public",
             content_warning=self.cw.GetValue().strip(),

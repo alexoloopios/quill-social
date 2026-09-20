@@ -10,8 +10,10 @@ from pathlib import Path
 from uuid import uuid4
 
 from quill_social.a11y import A11ySettings
+from quill_social.keymap import validate_chord
 
-FILES = ("a11y.json", "keymap.json")
+FILES = ("a11y.json", "keymap.json", "global-shortcuts.json")
+REQUIRED_FILES = {"a11y.json", "keymap.json"}
 FORMAT = "quill-social-settings"
 MAX_BYTES = 2 * 1024 * 1024
 
@@ -21,7 +23,8 @@ def backup_directory(data_dir: str | Path) -> Path:
 
 
 def _validate_files(files: object) -> dict:
-    if not isinstance(files, dict) or set(files) != set(FILES):
+    if (not isinstance(files, dict) or not REQUIRED_FILES.issubset(files)
+            or not set(files).issubset(FILES)):
         raise ValueError("The backup must contain preferences and keyboard shortcuts only.")
     defaults = A11ySettings().to_dict()
     for name, values in files.items():
@@ -29,10 +32,17 @@ def _validate_files(files: object) -> dict:
             continue  # An absent settings file means use application defaults.
         if not isinstance(values, dict):
             raise ValueError(f"Invalid settings in {name}.")
-        if name == "keymap.json":
+        if name in {"keymap.json", "global-shortcuts.json"}:
             if any(not isinstance(key, str) or not isinstance(value, str)
                    for key, value in values.items()):
                 raise ValueError("Keyboard shortcuts must map command names to text.")
+            if name == "global-shortcuts.json":
+                if not set(values).issubset({"show_window", "compose", "refresh"}):
+                    raise ValueError("The backup contains an unsupported global shortcut command.")
+                chords = [validate_chord(value, global_hotkey=True) for value in values.values()]
+                assigned = [chord for chord in chords if chord]
+                if len(assigned) != len(set(assigned)):
+                    raise ValueError("Global shortcuts must use different keys.")
         else:
             for key, value in values.items():
                 if key not in defaults or type(value) is not type(defaults[key]):
@@ -99,6 +109,7 @@ def create_backup(data_dir: str | Path, *, only_if_changed: bool = False) -> Pat
 def restore_backup(path: str | Path, data_dir: str | Path) -> Path:
     """Validate first, preserve a recovery backup, and roll back failed writes.
 
+    Older backups omit global shortcuts, which are preserved when restoring.
     Each replacement is atomic. Multiple files cannot be an OS transaction;
     any write failure triggers restoration of the exact original bytes.
     """
