@@ -80,3 +80,21 @@ def test_speech_failure_preserves_status_text(output):
     fn, args = callbacks.pop()
     fn(*args)
     frame.SetStatusText.assert_called_once_with("Reposted")
+
+
+def test_repeat_last_ignores_suppressed_messages(output):
+    announcer, _, speaker, callbacks = output
+    announcer.say("Thread sent.", "action")
+    announcer.say("Routine update", "normal")
+    announcer.repeat_last()
+    fn, args = callbacks[-1]
+    fn(*args)
+    speaker.speak.assert_called_once_with("Thread sent.", interrupt=True)
+
+
+def test_repeat_before_first_announcement(output):
+    announcer, _, speaker, callbacks = output
+    announcer.repeat_last()
+    fn, args = callbacks[-1]
+    fn(*args)
+    speaker.speak.assert_called_once_with("No announcement to repeat.", interrupt=True)

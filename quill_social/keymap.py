@@ -36,6 +36,7 @@ DEFAULT_BINDINGS: dict[str, str] = {
     "play_media": "Ctrl+Enter",
     "command_center": "Ctrl+Shift+C",
     "where_am_i": "Ctrl+Shift+I",
+    "repeat_announcement": "Ctrl+Shift+Space",
     "next_pane": "F6",
     "prev_pane": "Shift+F6",
     "refresh": "F5",

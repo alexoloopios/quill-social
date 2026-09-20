@@ -15,6 +15,7 @@ class TrayController(wx.adv.TaskBarIcon):
             icon = wx.ArtProvider.GetIcon(wx.ART_INFORMATION, wx.ART_OTHER, (32, 32))
             if self.SetIcon(icon, "Quill Social"):
                 self.frame.Hide()
+                self.frame.announcer.say("Quill Social minimized to system tray.", "action")
         event.Skip()
 
     def restore(self, event=None):
@@ -22,6 +23,7 @@ class TrayController(wx.adv.TaskBarIcon):
         self.frame.Iconize(False)
         self.frame.Raise()
         self.RemoveIcon()
+        self.frame.announcer.say("Quill Social restored.", "action")
 
     def CreatePopupMenu(self):
         menu = wx.Menu()

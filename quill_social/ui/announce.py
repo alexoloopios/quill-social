@@ -25,6 +25,7 @@ class Announcer:
     def __init__(self, frame, *, verbosity: str = "normal") -> None:
         self.frame = frame
         self.verbosity = verbosity
+        self.last_message = ""
         self._speaker = self._make_speaker()
 
     def _make_speaker(self):
@@ -52,6 +53,8 @@ class Announcer:
         """
         if not text:
             return
+        if self._allowed(level):
+            self.last_message = text
         import wx
 
         wx.CallAfter(self._emit, text, interrupt, self._allowed(level))
@@ -76,3 +79,6 @@ class Announcer:
 
     def error(self, text: str) -> None:
         self.say(text, "error", interrupt=True)
+
+    def repeat_last(self) -> None:
+        self.say(self.last_message or "No announcement to repeat.", "action", interrupt=True)

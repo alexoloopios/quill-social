@@ -711,5 +711,13 @@ class OutboxDialog(wx.Dialog):
     def _on_remove(self, _event: wx.CommandEvent) -> None:
         idx = self.item_list.GetFirstSelected()
         if 0 <= idx < len(self._items):
-            self.outbox.remove(self._items[idx].outbox_id)
+            announcer = getattr(self.GetParent(), "announcer", None)
+            try:
+                self.outbox.remove(self._items[idx].outbox_id)
+            except Exception as exc:
+                if announcer:
+                    announcer.error(f"Could not remove outbox post: {exc}")
+                return
             self.reload()
+            if announcer:
+                announcer.say("Post removed from outbox.", "action")

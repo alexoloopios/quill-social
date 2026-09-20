@@ -263,14 +263,23 @@ class SocialFrame(wx.Frame):
             return
         try:
             results = self.scheduler.run_due()
-        except Exception:
+        except Exception as exc:
+            self.announcer.error(f"Scheduled posting could not run: {exc}")
             return
         published = [r for r in results if r.published]
         if published:
             self._refresh_from_network(announce=False)
             self._load_scope(self.current_scope, self.current_scope_label)
-            self.announcer.say(
-                f"Scheduler published {len(published)} post(s).", "normal")
+        for result in results:
+            account = self.store.get_account(result.plan.account_id)
+            label = account.label if account else result.plan.account_id
+            if result.published:
+                self.announcer.say(f"{label}: Scheduled post sent.", "action")
+            elif result.retry_scheduled:
+                when = format_timestamp(result.plan.next_retry_at, self.a11y.display_timezone)
+                self.announcer.error(f"{label}: Post could not be sent. Queued to retry at {when}. {result.message}")
+            else:
+                self.announcer.error(f"{label}: Post failed. {result.message}")
 
     # -- first run ------------------------------------------------------------
 
@@ -464,6 +473,8 @@ class SocialFrame(wx.Frame):
         bar.Append(view, "&View")
 
         tools = wx.Menu()
+        self._menu_item(tools, "Repeat last &announcement\tCtrl+Shift+Space",
+                        lambda event: self.announcer.repeat_last())
         for label, handler in (("&Command Center\tCtrl+Shift+C", self.cmd_command_center),
                                ("&Safety Center", self.cmd_safety_center),
                                ("&Notification policies", self.cmd_notification_policies),
@@ -533,6 +544,8 @@ class SocialFrame(wx.Frame):
         bar.Append(m_studio, "&Studio")
 
         m_tools = wx.Menu()
+        self._menu_item(m_tools, "Repeat last &announcement\tCtrl+Shift+Space",
+                        lambda event: self.announcer.repeat_last())
         self._menu_item(m_tools, "&Command Center\tCtrl+Shift+C",
                         lambda _e: self.cmd_command_center())
         self._menu_item(m_tools, "&Where Am I\tCtrl+Shift+I",
@@ -1251,6 +1264,9 @@ class SocialFrame(wx.Frame):
         event.Skip()
 
     def _dispatch(self, command_id: str) -> bool:
+        if command_id == "repeat_announcement":
+            self.announcer.repeat_last()
+            return True
         if command_id in ("next_pane", "prev_pane"):
             panes = ([self.accounts, self.timelines, self.list] if self.a11y.ui_mode == "standard"
                      else [self.accounts, self.nav, self.list, self.details])
@@ -1371,37 +1387,62 @@ class SocialFrame(wx.Frame):
         self._publish_now(draft)
 
     def _publish_now(self, draft) -> None:
-        results = []
+        if getattr(self, "_publishing", False):
+            self.store.put_draft(draft)
+            self.announcer.say("Another post is still sending. This post was saved as a draft.", "action")
+            return
+        targets = []
         for account_id in draft.targets:
             acct = self.store.get_account(account_id)
             if acct is None:
+                self.announcer.error(f"Cannot publish: account {account_id} is unavailable.")
                 continue
-            adapter = self._resolve_adapter(account_id)
-            caps = self.caps.get(account_id, acct.network)
-            counter = mastodon_counter if acct.network == "mastodon" else len
-            try:
-                if draft.thread_mode:
-                    split = split_thread(draft.text, caps.char_limit, counter=counter)
-                    res = publish_thread(
-                        adapter, split.texts(), run_id=draft.draft_id,
-                        visibility=draft.visibility,
-                        content_warning=draft.content_warning, lang=draft.lang,
-                        reply_to=draft.in_reply_to)
-                    results.append((acct.label, res.summary()))
-                else:
-                    from quill_social.adapters.base import PublishRequest
-                    adapter.publish(PublishRequest(
-                        text=draft.text, visibility=draft.visibility,
-                        content_warning=draft.content_warning, lang=draft.lang,
-                        in_reply_to=draft.in_reply_to, quote_of=draft.quote_of,
-                        idempotency_key=draft.draft_id))
-                    results.append((acct.label, "Published."))
-            except AdapterError as exc:
-                results.append((acct.label, f"Failed: {exc}"))
+            targets.append((acct, self.caps.get(account_id, acct.network)))
+        credentials = self.credentials
+        self._publishing = True
+
+        def worker():
+            results = []
+            for acct, caps in targets:
+                try:
+                    adapter = adapter_for(acct, credentials)
+                    if draft.thread_mode:
+                        counter = mastodon_counter if acct.network == "mastodon" else len
+                        split = split_thread(draft.text, caps.char_limit, counter=counter)
+                        res = publish_thread(
+                            adapter, split.texts(), run_id=draft.draft_id,
+                            visibility=draft.visibility, content_warning=draft.content_warning,
+                            lang=draft.lang, reply_to=draft.in_reply_to,
+                            on_progress=lambda index, total, remote, label=acct.label:
+                                self.announcer.say(f"{label}: Thread part {index} of {total} sent.", "action"))
+                        message = f"Thread sent. {res.total} parts." if res.ok else res.summary()
+                        if not res.ok:
+                            message += " " + res.results[-1].error_message
+                        results.append((acct.label, message, not res.ok))
+                    else:
+                        from quill_social.adapters.base import PublishRequest
+                        adapter.publish(PublishRequest(
+                            text=draft.text, visibility=draft.visibility,
+                            content_warning=draft.content_warning, lang=draft.lang,
+                            in_reply_to=draft.in_reply_to, quote_of=draft.quote_of,
+                            idempotency_key=draft.draft_id))
+                        results.append((acct.label, "Post sent.", False))
+                except Exception as exc:
+                    results.append((acct.label, f"Post failed: {exc}", True))
+            wx.CallAfter(self._finish_publish, results)
+        Thread(target=worker, daemon=True, name="social-publish").start()
+
+    def _finish_publish(self, results):
+        if self._closing:
+            return
+        self._publishing = False
         self._refresh_from_network(announce=False)
-        self._load_scope(self.current_scope, self.current_scope_label)
-        msg = "; ".join(f"{label}: {status}" for label, status in results)
-        self.announcer.say(msg or "Nothing published.", "normal")
+        self._load_scope(self.current_scope, self.current_scope_label, keep_selection=True, announce=False)
+        for label, status, failed in results:
+            if failed:
+                self.announcer.error(f"{label}: {status}")
+            else:
+                self.announcer.say(f"{label}: {status}", "action")
 
     def _toggle_flag(self, column: str, verb: str) -> None:
         item = self._current_item()
@@ -1512,11 +1553,22 @@ class SocialFrame(wx.Frame):
             return
         urls = list(dict.fromkeys(url.rstrip(".,;!?)") for url in urls))
         if len(urls) == 1 and self.a11y.open_single_link_without_dialog:
-            webbrowser.open(urls[0])
+            self._open_announced_link(urls[0])
             return
         with wx.SingleChoiceDialog(self, "Choose a link to open", "Post links", urls) as dialog:
             if dialog.ShowModal() == wx.ID_OK:
-                webbrowser.open(urls[dialog.GetSelection()])
+                self._open_announced_link(urls[dialog.GetSelection()])
+
+    def _open_announced_link(self, url):
+        try:
+            opened = webbrowser.open(url)
+        except Exception as exc:
+            self.announcer.error(f"Could not open link: {exc}")
+            return
+        if opened:
+            self.announcer.say("Opened link.", "action")
+        else:
+            self.announcer.error("Could not open link. Check your default browser.")
 
     def cmd_refresh(self) -> None:
         self._refresh_from_network(announce=True)
@@ -1713,6 +1765,8 @@ class SocialFrame(wx.Frame):
         has_item = self._current_item() is not None
         km = self.keymap
         commands = [
+            Command("repeat_announcement", "Repeat last announcement", self.announcer.repeat_last,
+                    shortcut=km.chord_for("repeat_announcement")),
             Command("edit_profile", "Edit my profile", self.cmd_edit_profile),
             Command("create_settings_backup", "Create settings backup", self.cmd_create_settings_backup),
             Command("restore_settings_backup", "Restore settings backup", self.cmd_restore_settings_backup),
@@ -1806,6 +1860,11 @@ class SocialFrame(wx.Frame):
             "About QUILL Social", wx.OK | wx.ICON_INFORMATION, self)
 
     def _on_close(self, _e) -> None:
+        if getattr(self, "_publishing", False):
+            self.announcer.say("A post is still sending. Wait for the result before closing.", "action")
+            if _e and _e.CanVeto():
+                _e.Veto()
+            return
         current = self._current_item()
         try:
             (self.data_dir / "reading-position.json").write_text(json.dumps({

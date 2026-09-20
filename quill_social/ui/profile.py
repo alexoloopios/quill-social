@@ -134,6 +134,9 @@ class ProfileDialog(wx.Dialog):
     def _saved(self, result, error):
         self._saving = False
         if not error:
+            parent = self.GetParent()
+            if parent and hasattr(parent, "announcer"):
+                parent.announcer.say("Profile updated.", "action")
             self.EndModal(wx.ID_OK)
             return
         self.panel.Enable()

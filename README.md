@@ -157,6 +157,18 @@ reads "from [author]: [post]"; elsewhere it uses "New home post from" or
 who favourited, boosted or followed. The first-sentence option shortens
 notification details only, leaving ordinary Home posts complete.
 
+Profile saves, minimizing/restoring the tray window, and opening links also
+announce their outcome. Thread posting runs in the background and announces
+each successfully sent part, completion, or the exact partial failure.
+Scheduled deliveries announce success, queued retries and failures; removing an
+offline Outbox item announces completion. Resolver failures on one scheduled
+account do not stop delivery attempts for other accounts.
+
+Use **Tools > Repeat last announcement**, the Command Center, or
+**Ctrl+Shift+Space** to hear the last spoken message again. The shortcut can be
+changed in Preferences. Quiet status updates do not replace the last spoken
+message. These confirmations remain available with minimal verbosity.
+
 Adding an account selects it and loads its timeline automatically. Live refresh
 runs in the background; failures are reported without preventing other accounts
 from loading. The `security` extra supplies the OS credential backend. If it is

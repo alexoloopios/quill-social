@@ -20,6 +20,7 @@ COMMAND_LABELS = {
     **{f"goto_{n}": f"Go to view {n}" for n in range(1, 10)},
 }
 GLOBAL_LABELS = {"show_window": "Show Quill Social", "compose": "New post", "refresh": "Refresh"}
+COMMAND_LABELS["repeat_announcement"] = "Repeat last announcement"
 
 
 def load_global_bindings(data_dir: Path) -> dict[str, str]:
@@ -164,8 +165,12 @@ class GlobalHotkeys:
         if command is None or not self.frame.IsEnabled():
             return
         if command in {"show_window", "compose"}:
-            self.frame.Show()
-            self.frame.Iconize(False)
-            self.frame.Raise()
+            tray = getattr(self.frame, "_tray", None)
+            if tray and (not self.frame.IsShown() or self.frame.IsIconized()):
+                tray.restore()
+            else:
+                self.frame.Show()
+                self.frame.Iconize(False)
+                self.frame.Raise()
         if command != "show_window":
             self.frame._dispatch(command)
