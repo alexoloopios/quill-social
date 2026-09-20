@@ -24,6 +24,61 @@ def app(tmp_path, monkeypatch):
     application.Destroy()
 
 
+def test_exports_keep_account_scope_and_do_not_change_navigation(app, monkeypatch):
+    from quill_social.model import Account, SocialItem
+    from quill_social.ui.app import SocialFrame
+
+    frame = SocialFrame()
+    try:
+        frame.store.put_account(Account(account_id="export-a", handle="reader"))
+        frame.store.put_account(Account(account_id="export-b", handle="other"))
+        for index in range(505):
+            frame.store.upsert_item(SocialItem(account_id="export-a", text=f"Export post {index}",
+                                              remote_id=str(index), created_at=index + 1))
+        frame.store.upsert_item(SocialItem(account_id="export-b", text="Other account private text"))
+        frame.selected_account_id = "export-a"
+        frame._load_scope("home:all", "Home")
+        before = [item.item_id for item in frame._items]
+        read_states = [item.read for item in frame._items]
+        exports = []
+        monkeypatch.setattr(frame, "_save_timeline_export", lambda text, title: exports.append(text))
+        frame.cmd_export_timeline()
+        assert "Export post 504" in exports[-1]
+        assert "Other account private text" not in exports[-1]
+        frame.cmd_export_all_timelines()
+        assert "Export post 0\n" in exports[-1]  # Includes cache beyond the visible 500.
+        assert "Other account private text" not in exports[-1]
+        assert [item.item_id for item in frame._items] == before
+        assert frame.current_scope == "home:all"
+        assert [item.read for item in frame._items] == read_states
+    finally:
+        frame._on_close(None)
+
+
+def test_restored_settings_are_applied_and_survive_close(app, monkeypatch, tmp_path):
+    from quill_social import a11y
+    from quill_social.services.settings_backup import create_backup, restore_backup
+    from quill_social.ui import app as app_module
+
+    frame = app_module.SocialFrame()
+    data_dir = frame.data_dir
+    try:
+        a11y.save(data_dir, a11y.A11ySettings(ui_mode="advanced", exclude_web_addresses=True))
+        backup = create_backup(data_dir)
+        a11y.save(data_dir, frame.a11y)
+        def restore(parent, directory):
+            restore_backup(backup, directory)
+            return True
+        monkeypatch.setattr(app_module, "restore_settings_backup", restore)
+        frame.cmd_restore_settings_backup()
+        assert frame.a11y.ui_mode == "advanced"
+        assert frame.a11y.exclude_web_addresses
+        assert frame.GetMenuBar().FindMenu("Studio") != wx.NOT_FOUND
+    finally:
+        frame._on_close(None)
+    assert a11y.load(data_dir).exclude_web_addresses
+
+
 def test_frame_builds_and_navigates(app):
     from quill_social.ui.app import SocialFrame
 

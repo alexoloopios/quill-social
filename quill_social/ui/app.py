@@ -13,7 +13,9 @@ the engine onto ``quill.ui.app_shell.AppShellFrame`` (PRD 44).
 
 from __future__ import annotations
 
+import logging
 import webbrowser
+from pathlib import Path
 from threading import Thread
 
 import wx
@@ -41,8 +43,10 @@ from quill_social.services.ai import accessibility as ai_a11y
 from quill_social.services.ai import understand as ai_understand
 from quill_social.services.refresh import fetch_accounts
 from quill_social.services.scheduler import Scheduler
+from quill_social.services.settings_backup import create_backup
 from quill_social.services.thread_publisher import publish_thread
 from quill_social.services.thread_splitter import mastodon_counter, split_thread
+from quill_social.services.timeline_export import timeline_text
 from quill_social.time_display import format_timestamp
 from quill_social.ui.announce import Announcer
 from quill_social.ui.commands import Command, CommandPalette
@@ -54,6 +58,8 @@ from quill_social.ui.manage import (
     SafetyCenterDialog,
 )
 from quill_social.ui.media_player import MediaPlayerDialog
+from quill_social.ui.profile import ProfileDialog
+from quill_social.ui.settings_backup import create_settings_backup, restore_settings_backup
 from quill_social.ui.studio import (
     AgendaDialog,
     ApprovalsDialog,
@@ -113,6 +119,7 @@ class SocialFrame(wx.Frame):
         self.store = SocialStore(paths.db_path())
         self.a11y = a11y_mod.load(self.data_dir)
         self.keymap = keymap_mod.load(self.data_dir)
+        self._backup_settings()
         self.caps = CapabilityRegistry()
         self.profile = FieldProfile()
         self.credentials = _make_credential_store()
@@ -217,11 +224,110 @@ class SocialFrame(wx.Frame):
         if previous:
             previous.Destroy()
 
+    def _append_ported_file_items(self, menu) -> None:
+        menu.AppendSeparator()
+        self._menu_item(menu, "Edit &My Profile...", lambda event: self.cmd_edit_profile())
+        self._menu_item(menu, "Export &Current Timeline...", lambda event: self.cmd_export_timeline())
+        self._menu_item(menu, "Export All &Timelines...", lambda event: self.cmd_export_all_timelines())
+        menu.AppendSeparator()
+        self._menu_item(menu, "Create Settings &Backup...", lambda event: self.cmd_create_settings_backup())
+        self._menu_item(menu, "&Restore Settings Backup...", lambda event: self.cmd_restore_settings_backup())
+
+    def cmd_edit_profile(self) -> None:
+        account = self.store.get_account(self.selected_account_id) if self.selected_account_id else None
+        if account is None:
+            accounts = [account for account in self.store.list_accounts()
+                        if account.network in ("mastodon", "bluesky")]
+            if not accounts:
+                self.announcer.say("Add a Mastodon or Bluesky account to edit your profile.", "normal")
+                return
+            with wx.SingleChoiceDialog(self, "Choose the account whose profile you want to edit.",
+                                       "Edit My Profile", [account.full_handle for account in accounts]) as chooser:
+                if chooser.ShowModal() != wx.ID_OK:
+                    return
+                account = accounts[chooser.GetSelection()]
+        if account.network not in ("mastodon", "bluesky"):
+            self.announcer.say("Profile editing is available for Mastodon and Bluesky accounts.", "normal")
+            return
+        credentials = self.credentials
+        with ProfileDialog(self, lambda: adapter_for(account, credentials),
+                           account_label=account.full_handle) as dialog:
+            if dialog.ShowModal() == wx.ID_OK and "display_name" in dialog.controls:
+                account.display_name = dialog.controls["display_name"].GetValue()
+                self.store.put_account(account)
+                self._populate_accounts()
+
+    def _backup_settings(self) -> None:
+        try:
+            create_backup(self.data_dir, only_if_changed=True)
+        except (OSError, ValueError):
+            logging.getLogger(__name__).exception("Could not create automatic settings backup")
+
+    def cmd_create_settings_backup(self) -> None:
+        a11y_mod.save(self.data_dir, self.a11y)
+        keymap_mod.save(self.data_dir, self.keymap)
+        create_settings_backup(self, self.data_dir)
+
+    def cmd_restore_settings_backup(self) -> None:
+        if not restore_settings_backup(self, self.data_dir):
+            return
+        self.a11y = a11y_mod.load(self.data_dir)
+        self.keymap = keymap_mod.load(self.data_dir)
+        self.announcer.set_verbosity(self.a11y.verbosity)
+        a11y_mod.apply_to_frame(self, self.a11y)
+        self._apply_ui_mode()
+        self._load_scope(self.current_scope, self.current_scope_label, keep_selection=True)
+        self.announcer.say("Preferences and keyboard shortcuts restored.", "normal")
+
+    def cmd_export_timeline(self) -> None:
+        accounts = {account.account_id: account for account in self.store.list_accounts()}
+        if self.current_scope.startswith(("pub:", "gh:")):
+            rows = [self.list.GetItemText(index) for index in range(self.list.GetItemCount())]
+            text = self.current_scope_label + "\n\n" + "\n".join(rows)
+        else:
+            if not self._items:
+                self.announcer.say("There are no posts in this timeline to export.", "normal")
+                return
+            text = timeline_text(self.current_scope_label, self._items,
+                                 accounts=accounts, timezone=self.a11y.display_timezone)
+        self._save_timeline_export(text, "Current Timeline")
+
+    def cmd_export_all_timelines(self) -> None:
+        accounts = {account.account_id: account for account in self.store.list_accounts()}
+        selected = accounts.get(self.selected_account_id)
+        label = selected.full_handle if selected else "Unified Home (all accounts)"
+        sections = [f"Quill Social timelines: {label}\n"
+                    "Export of locally cached posts; does not fetch older server history.\n"]
+        destinations = [(label, scope) for _, _, children in NAV_TREE
+                        for label, scope in children if scope in STANDARD_SCOPES]
+        destinations.extend((folder.name, f"smart:{folder.folder_id}")
+                            for folder in self.store.list_folders(kind="smart"))
+        for title, scope in destinations:
+            sections.append(timeline_text(title, self._scope_items(scope, limit=-1),
+                                          accounts=accounts, timezone=self.a11y.display_timezone))
+        self._save_timeline_export("\n".join(sections), "All Timelines")
+
+    def _save_timeline_export(self, text: str, title: str) -> None:
+        with wx.FileDialog(self, f"Export {title.lower()}",
+                           defaultFile=f"Quill Social {title}.txt",
+                           wildcard="Text files (*.txt)|*.txt",
+                           style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as dialog:
+            if dialog.ShowModal() != wx.ID_OK:
+                return
+            path = Path(dialog.GetPath())
+        try:
+            path.write_text(text, encoding="utf-8")
+        except OSError as exc:
+            self.announcer.error(f"Could not export timelines: {exc}")
+            return
+        self.announcer.say(f"Timeline exported to {path}", "normal")
+
     def _build_standard_menu(self) -> None:
         bar = wx.MenuBar()
         file_menu = wx.Menu()
         self._menu_item(file_menu, "Add &Account...\tCtrl+Shift+A", self._on_add_account)
         self._menu_item(file_menu, "&Preferences...", self._on_preferences)
+        self._append_ported_file_items(file_menu)
         file_menu.AppendSeparator()
         self._menu_item(file_menu, "E&xit\tAlt+F4", lambda event: self.Close())
         bar.Append(file_menu, "&File")
@@ -291,6 +397,7 @@ class SocialFrame(wx.Frame):
         m_file = wx.Menu()
         self._menu_item(m_file, "Add &Account...\tCtrl+Shift+A", self._on_add_account)
         self._menu_item(m_file, "&Preferences...", self._on_preferences)
+        self._append_ported_file_items(m_file)
         m_file.AppendSeparator()
         self._menu_item(m_file, "E&xit\tAlt+F4", lambda _e: self.Close())
         bar.Append(m_file, "&File")
@@ -665,9 +772,9 @@ class SocialFrame(wx.Frame):
             self._refresh_pending = False
             self._refresh_from_network()
 
-    def _scope_items(self, scope: str) -> list:
+    def _scope_items(self, scope: str, *, limit: int = 500) -> list:
         def items(**filters):
-            return self.store.list_items(account_id=self.selected_account_id, limit=500, **filters)
+            return self.store.list_items(account_id=self.selected_account_id, limit=limit, **filters)
         if scope == "home:all":
             return items()
         if scope == "home:unread":
@@ -684,9 +791,10 @@ class SocialFrame(wx.Frame):
         if scope == "library:favourites":
             return items(favourited=True)
         if scope == "discover:search":
-            return self.store.search_items(self.last_search, account_id=self.selected_account_id) if self.last_search else []
+            return self.store.search_items(self.last_search, account_id=self.selected_account_id,
+                                           limit=limit) if self.last_search else []
         if scope == "discover:catchup":
-            return self._catchup_items()
+            return self._catchup_items(limit=limit)
         if scope.startswith("smart:"):
             folder_id = scope.split(":", 1)[1]
             folders = {f.folder_id: f for f in self.store.list_folders(kind="smart")}
@@ -695,8 +803,8 @@ class SocialFrame(wx.Frame):
                 return smartfolder_svc.evaluate(items(), folder.rule)
         return []
 
-    def _catchup_items(self) -> list:
-        items = self.store.list_items(account_id=self.selected_account_id, limit=500)
+    def _catchup_items(self, *, limit: int = 500) -> list:
+        items = self.store.list_items(account_id=self.selected_account_id, limit=limit)
         items = catchup_svc.collapse_reposts(items)
         items = catchup_svc.collapse_cross_network(items)
         return items
@@ -718,6 +826,8 @@ class SocialFrame(wx.Frame):
             self._load_github(scope, label)
             return
         self._items = self._scope_items(scope)
+        if self.a11y.reverse_timelines:
+            self._items.reverse()
         self._render_list(selected_item_id=previous_id)
         selected = self._current_item()
         if previous_id and selected and selected.item_id == previous_id:
@@ -839,7 +949,7 @@ class SocialFrame(wx.Frame):
             f"Author: {item.author_display} {item.author_handle}",
             f"Network: {item.network}"
             + (f" ({acct.label})" if acct else ""),
-            f"When: {format_timestamp(item.created_at, self.a11y.display_timezone)}",
+            f"When: {format_timestamp(item.created_at, self.a11y.display_timezone, twelve_hour=self.a11y.post_timestamps_12_hour)}",
             f"Visibility: {item.visibility}",
         ]
         if item.content_warning:
@@ -1307,6 +1417,11 @@ class SocialFrame(wx.Frame):
         has_item = self._current_item() is not None
         km = self.keymap
         commands = [
+            Command("edit_profile", "Edit my profile", self.cmd_edit_profile),
+            Command("create_settings_backup", "Create settings backup", self.cmd_create_settings_backup),
+            Command("restore_settings_backup", "Restore settings backup", self.cmd_restore_settings_backup),
+            Command("export_timeline", "Export current timeline", self.cmd_export_timeline),
+            Command("export_all_timelines", "Export all timelines", self.cmd_export_all_timelines),
             Command("standard_mode", "Switch to Standard mode", lambda: self.set_ui_mode("standard")),
             Command("advanced_mode", "Switch to Advanced mode", lambda: self.set_ui_mode("advanced")),
             Command("view_post", "View post", self.cmd_view_post, is_available=lambda: has_item),
@@ -1404,6 +1519,7 @@ class SocialFrame(wx.Frame):
         try:
             a11y_mod.save(self.data_dir, self.a11y)
             keymap_mod.save(self.data_dir, self.keymap)
+            self._backup_settings()
             self.store.close()
         except Exception:
             pass
@@ -1748,41 +1864,68 @@ class AddAccountDialog(wx.Dialog):
 
 
 class PreferencesDialog(wx.Dialog):
-    """Accessibility preferences (PRD 28.5)."""
+    """Presentation and reading preferences, using native notebook pages."""
 
     def __init__(self, parent, settings):
         super().__init__(parent, title="Preferences")
         self._settings = settings
+        outer = wx.BoxSizer(wx.VERTICAL)
+        self.notebook = wx.Notebook(self)
+        general = wx.Panel(self.notebook)
+        reading = wx.Panel(self.notebook)
+        self.notebook.AddPage(general, "General")
+        self.notebook.AddPage(reading, "Reading")
         sizer = wx.BoxSizer(wx.VERTICAL)
-        sizer.Add(wx.StaticText(self, label="Interface &mode:"), 0, wx.ALL, 6)
-        self.ui_mode = wx.Choice(self, choices=["Standard", "Advanced"])
+        sizer.Add(wx.StaticText(general, label="Interface &mode:"), 0, wx.ALL, 6)
+        self.ui_mode = wx.Choice(general, choices=["Standard", "Advanced"])
         self.ui_mode.SetName("Interface mode")
         self.ui_mode.SetSelection(1 if settings.ui_mode == "advanced" else 0)
         sizer.Add(self.ui_mode, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 6)
-        sizer.Add(wx.StaticText(self, label="Display time &zone:"), 0, wx.ALL, 6)
-        self.display_timezone = wx.Choice(self, choices=["System timezone", "UTC"])
+        sizer.Add(wx.StaticText(general, label="Display time &zone:"), 0, wx.ALL, 6)
+        self.display_timezone = wx.Choice(general, choices=["System timezone", "UTC"])
         self.display_timezone.SetName("Display time zone")
         self.display_timezone.SetSelection(1 if settings.display_timezone == "utc" else 0)
         sizer.Add(self.display_timezone, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 6)
-        sizer.Add(wx.StaticText(self, label="Announcement verbosity:"),
+        sizer.Add(wx.StaticText(general, label="Announcement verbosity:"),
                   0, wx.ALL, 6)
-        self.verbosity = wx.Choice(self, choices=["minimal", "normal", "verbose"])
+        self.verbosity = wx.Choice(general, choices=["minimal", "normal", "verbose"])
         self.verbosity.SetName("Verbosity")
         self.verbosity.SetStringSelection(settings.verbosity)
         sizer.Add(self.verbosity, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 6)
-        self.high_contrast = wx.CheckBox(self, label="High contrast")
+        self.high_contrast = wx.CheckBox(general, label="High contrast")
         self.high_contrast.SetValue(settings.high_contrast)
         sizer.Add(self.high_contrast, 0, wx.ALL, 6)
-        self.speak_network = wx.CheckBox(self, label="Speak network on each row")
+        self.speak_network = wx.CheckBox(general, label="Speak network on each row")
         self.speak_network.SetValue(settings.speak_network_prefix)
         sizer.Add(self.speak_network, 0, wx.ALL, 6)
         self.speak_engagement = wx.CheckBox(
-            self, label="Speak engagement counts on each row")
+            general, label="Speak engagement counts on each row")
         self.speak_engagement.SetValue(settings.speak_engagement)
         sizer.Add(self.speak_engagement, 0, wx.ALL, 6)
-        sizer.Add(self.CreateButtonSizer(wx.OK | wx.CANCEL),
+        general.SetSizer(sizer)
+        reading_sizer = wx.BoxSizer(wx.VERTICAL)
+        self._reading_controls = {}
+        for name, label in (
+            ("reverse_timelines", "Show newest posts at bottom"),
+            ("condense_mentions", "Condense multiple leading mentions in post rows"),
+            ("exclude_web_addresses", "Exclude web addresses from post rows"),
+            ("post_timestamps_relative", "Show post times as relative times"),
+            ("post_timestamps_12_hour", "Show absolute post times in 12 hour format"),
+            ("announce_read_state", "Include read or unread state in post rows"),
+        ):
+            control = wx.CheckBox(reading, label=label)
+            control.SetName(label)
+            control.SetValue(getattr(settings, name))
+            self._reading_controls[name] = control
+            reading_sizer.Add(control, 0, wx.ALL, 6)
+        reading_sizer.Add(wx.StaticText(reading, label=(
+            "Post row preferences also apply to field navigation. "
+            "The full post remains available in View post and exports.")), 0, wx.ALL, 6)
+        reading.SetSizer(reading_sizer)
+        outer.Add(self.notebook, 1, wx.EXPAND | wx.ALL, 6)
+        outer.Add(self.CreateButtonSizer(wx.OK | wx.CANCEL),
                   0, wx.ALIGN_RIGHT | wx.ALL, 8)
-        self.SetSizerAndFit(sizer)
+        self.SetSizerAndFit(outer)
 
     def run_and_apply(self, frame) -> None:
         if self.ShowModal() == wx.ID_OK:
@@ -1792,7 +1935,11 @@ class PreferencesDialog(wx.Dialog):
             self._settings.high_contrast = self.high_contrast.GetValue()
             self._settings.speak_network_prefix = self.speak_network.GetValue()
             self._settings.speak_engagement = self.speak_engagement.GetValue()
+            for name, control in self._reading_controls.items():
+                setattr(self._settings, name, control.GetValue())
+            frame._backup_settings()
             a11y_mod.save(frame.data_dir, self._settings)
+            frame._backup_settings()
             frame.announcer.set_verbosity(self._settings.verbosity)
             a11y_mod.apply_to_frame(frame, self._settings)
             frame._apply_ui_mode()

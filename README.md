@@ -85,6 +85,31 @@ Tab navigates out of the editor in both modes.
 Both modes use the same accounts, storage, adapters and publishing services;
 they do not load the original recovered application. Sounds remain deferred.
 
+Both File menus include **Edit My Profile**, **Export Current Timeline**,
+**Export All Timelines**, **Create Settings Backup**, and **Restore Settings Backup**.
+Profile editing uses the selected account, or asks for an account from Unified
+Home. Mastodon supports name, biography, avatar/header, custom fields and supported
+profile privacy settings. Bluesky supports name and biography. Changes are sent
+only when Save is chosen; loading and saving run in the background.
+
+Timeline exports are UTF-8 text with full post text, timestamps, links, content
+warnings, media descriptions and polls. Current Timeline exports the displayed
+posts; All Timelines exports the selected account's cached reading timelines
+(all accounts from Unified Home), including smart folders. It does not download
+older server history or export publishing queues as timelines.
+
+Settings backups contain Preferences and keyboard shortcuts, not accounts,
+credentials, posts, drafts or database settings. Automatic snapshots are made
+at startup, on preference changes and on exit. Restore validates a Quill Social
+backup, preserves a recovery copy and applies restored settings immediately.
+Recovered-client backup files use a different format and cannot be imported.
+
+Preferences now has General and Reading tabs. Reading controls include newest
+posts at bottom, condensed leading mentions, hiding URLs from post rows,
+relative or absolute timestamps, a 12-hour clock for absolute times, and read
+state announcements. These presentation choices keep full post text available
+in View Post and exports.
+
 Adding an account selects it and loads its timeline automatically. Live refresh
 runs in the background; failures are reported without preventing other accounts
 from loading. The `security` extra supplies the OS credential backend. If it is

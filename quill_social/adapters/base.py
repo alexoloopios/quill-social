@@ -110,6 +110,14 @@ class NetworkAdapter(ABC):
     def delete(self, remote_id: str) -> None:
         raise AdapterError("delete not supported", kind="validation")
 
+    def own_profile(self) -> dict:
+        """Read editable profile fields for the authenticated account."""
+        raise AdapterError("Profile editing is not supported for this network.", kind="validation")
+
+    def update_profile(self, changes: dict) -> None:
+        """Apply explicitly edited profile fields, preserving other settings."""
+        raise AdapterError("Profile editing is not supported for this network.", kind="validation")
+
     @classmethod
     def available(cls) -> bool:
         """Whether this adapter's dependencies are installed and usable."""

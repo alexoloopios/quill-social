@@ -12,6 +12,7 @@ speech. What is spoken is data, never color or position (PRD 6.5).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from quill_social.a11y import A11ySettings
@@ -114,9 +115,21 @@ def field_value(
     if field_id == "handle":
         return item.author_handle
     if field_id == "text":
-        return item.text.replace("\n", " ").strip()
+        text = item.text.replace("\n", " ").strip()
+        if s.condense_mentions:
+            leading = re.match(r"^(?:@[\w.-]+(?:@[\w.-]+)?\s+){2,}", text)
+            if leading:
+                recipients = leading.group().split()
+                text = f"{recipients[0]} and {len(recipients) - 1} others: {text[leading.end():]}"
+        if s.exclude_web_addresses:
+            text = re.sub(r"https?://\S+", "", text)
+            text = " ".join(text.split())
+        return text
     if field_id == "date":
-        return _rel_time(item.created_at, now=now, timezone=s.display_timezone)
+        if s.post_timestamps_relative:
+            return _rel_time(item.created_at, now=now, timezone=s.display_timezone)
+        pattern = "%Y-%m-%d %I:%M %p %Z" if s.post_timestamps_12_hour else "%Y-%m-%d %H:%M %Z"
+        return display_datetime(item.created_at, s.display_timezone).strftime(pattern)
     if field_id == "network":
         return item.network.capitalize()
     if field_id == "account":

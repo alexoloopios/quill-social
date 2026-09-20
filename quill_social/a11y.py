@@ -40,6 +40,11 @@ class A11ySettings:
     announce_read_state: bool = True
     display_timezone: Literal["system", "utc"] = "system"
     ui_mode: Literal["standard", "advanced"] = "standard"
+    reverse_timelines: bool = False
+    condense_mentions: bool = False
+    exclude_web_addresses: bool = False
+    post_timestamps_relative: bool = True
+    post_timestamps_12_hour: bool = False
 
     @property
     def text_scale(self) -> float:
@@ -69,6 +74,11 @@ class A11ySettings:
             speak_network_prefix=bool(d.get("speak_network_prefix", True)),
             speak_engagement=bool(d.get("speak_engagement", False)),
             announce_read_state=bool(d.get("announce_read_state", True)),
+            reverse_timelines=d.get("reverse_timelines") is True,
+            condense_mentions=d.get("condense_mentions") is True,
+            exclude_web_addresses=d.get("exclude_web_addresses") is True,
+            post_timestamps_relative=d.get("post_timestamps_relative", True) is not False,
+            post_timestamps_12_hour=d.get("post_timestamps_12_hour") is True,
         )
 
 

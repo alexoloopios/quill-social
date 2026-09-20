@@ -274,6 +274,33 @@ class MastodonAdapter(NetworkAdapter):
             raise _mastodon_error(exc) from exc
         return [_status_to_item(s, account_id=self._account_id) for s in statuses or []]
 
+    def own_profile(self) -> dict:
+        client = self._require_client()
+        try:
+            account = client.account_verify_credentials()
+        except Exception as exc:
+            raise _mastodon_error(exc) from exc
+        source = account.get("source") or {}
+        result = {
+            "display_name": account.get("display_name") or "",
+            "note": source.get("note", _html_to_text(account.get("note") or "")),
+            "fields": [(f.get("name", ""), f.get("value", ""))
+                       for f in source.get("fields", [])],
+        }
+        for key in ("locked", "bot", "discoverable", "hide_collections", "indexable"):
+            if account.get(key) is not None:
+                result[key] = bool(account[key])
+        return result
+
+    def update_profile(self, changes: dict) -> None:
+        client = self._require_client()
+        allowed = {"display_name", "note", "fields", "avatar", "header", "locked",
+                   "bot", "discoverable", "hide_collections", "indexable"}
+        try:
+            client.account_update_credentials(**{k: v for k, v in changes.items() if k in allowed})
+        except Exception as exc:
+            raise _mastodon_error(exc) from exc
+
     def notifications(self, *, limit: int = 40) -> list[SocialItem]:
         client = self._require_client()
         try:

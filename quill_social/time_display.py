@@ -8,10 +8,11 @@ def display_datetime(ms: int, mode: str = "system") -> datetime:
     return instant if mode == "utc" else instant.astimezone()
 
 
-def format_timestamp(ms: int | None, mode: str = "system", *, missing: str = "unknown") -> str:
+def format_timestamp(ms: int | None, mode: str = "system", *, missing: str = "unknown", twelve_hour: bool = False) -> str:
     if ms is None:
         return missing
-    return display_datetime(ms, mode).strftime("%Y-%m-%d %H:%M %Z")
+    pattern = "%Y-%m-%d %I:%M %p %Z" if twelve_hour else "%Y-%m-%d %H:%M %Z"
+    return display_datetime(ms, mode).strftime(pattern)
 
 
 def preference_for(parent) -> str:

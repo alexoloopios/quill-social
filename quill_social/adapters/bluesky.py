@@ -246,6 +246,38 @@ class BlueskyAdapter(NetworkAdapter):
             raise AdapterError(_NOT_WIRED, kind="permission")
         return self._client
 
+    def own_profile(self) -> dict:
+        client = self._require_client()
+        try:
+            response = client.com.atproto.repo.get_record({
+                "repo": self.did, "collection": "app.bsky.actor.profile", "rkey": "self",
+            })
+            record = _as_dict(_attr(response, "value", {}))
+        except Exception as exc:
+            raise _bluesky_error(exc) from exc
+        return {"display_name": record.get("displayName", record.get("display_name", "")) or "",
+                "note": record.get("description") or ""}
+
+    def update_profile(self, changes: dict) -> None:
+        client = self._require_client()
+        try:
+            # Read again before saving; retain avatar, banner, labels and unknown fields.
+            response = client.com.atproto.repo.get_record({
+                "repo": self.did, "collection": "app.bsky.actor.profile", "rkey": "self",
+            })
+            value = _attr(response, "value", {})
+            record = dict(value) if isinstance(value, dict) else value.model_dump(by_alias=True, exclude_none=True)
+            if "display_name" in changes:
+                record["displayName"] = changes["display_name"]
+            if "note" in changes:
+                record["description"] = changes["note"]
+            client.com.atproto.repo.put_record({
+                "repo": self.did, "collection": "app.bsky.actor.profile", "rkey": "self",
+                "record": record, "swap_record": _attr(response, "cid"),
+            })
+        except Exception as exc:
+            raise _bluesky_error(exc) from exc
+
     def home_timeline(self, *, limit: int = 40, since_id: str = "") -> list[SocialItem]:
         client = self._require_client()
         try:

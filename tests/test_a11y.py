@@ -46,3 +46,16 @@ def test_interface_mode_defaults_and_invalid_values():
     assert A11ySettings.from_dict({}).ui_mode == "standard"
     assert A11ySettings.from_dict({"ui_mode": "unknown"}).ui_mode == "standard"
     assert A11ySettings.from_dict({"ui_mode": "advanced"}).ui_mode == "advanced"
+
+
+def test_reading_preferences_roundtrip_and_defaults(tmp_path):
+    settings = A11ySettings(reverse_timelines=True, condense_mentions=True,
+                            exclude_web_addresses=True, post_timestamps_relative=False,
+                            post_timestamps_12_hour=True)
+    a11y.save(tmp_path, settings)
+    assert a11y.load(tmp_path) == settings
+    defaults = A11ySettings.from_dict({})
+    assert defaults.post_timestamps_relative
+    assert not defaults.reverse_timelines
+    assert not defaults.condense_mentions
+    assert not defaults.exclude_web_addresses
