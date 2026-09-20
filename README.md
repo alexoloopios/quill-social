@@ -51,9 +51,39 @@ The first launch seeds a demo account so the timeline is immediately usable. Use
 The Accounts list starts with **Unified Home**, followed by your accounts.
 Choose an account with Up/Down to show its Home and scope its navigation,
 cached posts, search results and publishing entries. Choose Unified Home to
-see all accounts again. Other navigation sections start collapsed; expand them
-with Right Arrow. All existing destinations, commands and tools remain available.
+see all accounts again. Advanced mode retains all existing destinations and tools.
 GitHub and management tools retain their existing workspace-wide behavior.
+
+### Standard and Advanced modes
+
+Choose **View > Standard mode / Advanced mode**, or **File > Preferences >
+Interface mode**. The choice is saved and takes effect
+immediately. Your account and ordinary timeline selection are preserved;
+switching from an advanced-only view to Standard returns to Home. Standard is
+the default when no mode has been saved.
+
+Standard follows the recovered client's layout: Accounts, a flat Timelines list,
+Posts, and Refresh/New Post/Reply/View/Links buttons. Enter opens the selected
+post in a read-only dialog. Its menu bar is **File, Timeline, Post, Navigate,
+View, Tools**, focused on everyday reading and posting. Search is available
+with Ctrl+L or Navigate. Posts has its own visible label and accessible region.
+Advanced publishing, creation and integration tools are hidden from Standard's
+menus and Command Center.
+
+Advanced keeps the account list, grouped navigation tree, visible search and
+inline Details pane, along with Studio, calendar, scheduling, approvals,
+analytics, plugins and integration tools. Expand tree sections with Right Arrow.
+
+The Standard composer starts in the post editor. Its primary tab sequence is
+editor, visibility, Publish, Save draft, Cancel, then **More options**. More
+options exposes account selection, content warnings, media and alt text, and
+polls and thread splitting. Collapsing options keeps their values and reports
+active options. Templates and scheduling are shown only in Advanced.
+Existing thread drafts open in the selected mode with threading preserved.
+Tab navigates out of the editor in both modes.
+
+Both modes use the same accounts, storage, adapters and publishing services;
+they do not load the original recovered application. Sounds remain deferred.
 
 Adding an account selects it and loads its timeline automatically. Live refresh
 runs in the background; failures are reported without preventing other accounts
@@ -99,7 +129,7 @@ quill-social-cli split "a long post..." --limit 300
 | Ctrl+Shift+C | Command center |
 | Ctrl+Shift+I | Where Am I |
 | F5 | Refresh |
-| F6 / Shift+F6 | Next / previous pane: Accounts, Navigation, Timeline, Details |
+| F6 / Shift+F6 | Next / previous visible pane (Accounts, Timelines, Posts in Standard) |
 | F1 | Help |
 
 Command shortcuts are remappable (Preferences); F6 provides pane navigation.

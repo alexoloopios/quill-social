@@ -228,12 +228,14 @@ def test_background_refresh_preserves_reading_position(app):
         frame._on_close(None)
 
 
-def test_account_navigation_never_transfers_keyboard_focus(app, monkeypatch):
+@pytest.mark.parametrize("mode", ["standard", "advanced"])
+def test_account_navigation_never_transfers_keyboard_focus(app, monkeypatch, mode):
     from quill_social.model import Account
     from quill_social.ui.app import SocialFrame
 
     frame = SocialFrame()
     try:
+        frame.set_ui_mode(mode)
         frame.store.put_account(Account(account_id="second", network="mock", handle="@second"))
         frame._populate_accounts()
         frame.Show()
@@ -257,6 +259,12 @@ def test_account_navigation_never_transfers_keyboard_focus(app, monkeypatch):
             assert not transfers
             assert frame._nav_nodes == nodes
         assert not announcements  # Native account selection should speak uninterrupted.
+        if mode == "standard":
+            frame.timelines.SetFocus()
+            app.Yield()
+            assert frame.FindFocus() is frame.timelines
+            assert frame._timeline_scopes[frame.timelines.GetSelection()] == "home:all"
+            return
         frame.nav.SetFocus()
         app.Yield()
         assert frame.nav.GetSelection() == frame._nav_nodes["home:all"]
@@ -302,5 +310,159 @@ def test_display_timezone_preference_applies_immediately_and_cancel_keeps_value(
         dialog.run_and_apply(frame)
         assert frame.a11y.display_timezone == "utc"
         assert a11y.load(frame.data_dir).display_timezone == "utc"
+    finally:
+        frame._on_close(None)
+
+
+def test_mode_switch_preserves_account_view_post_and_features(app, monkeypatch):
+    from quill_social import a11y
+    from quill_social.ui.app import SocialFrame
+
+    frame = SocialFrame()
+    try:
+        frame.Show()
+        app.Yield()
+        assert frame.a11y.ui_mode == "standard"
+        assert frame.timelines.IsShownOnScreen()
+        assert not frame.nav.IsShownOnScreen()
+        assert not frame.details.IsShownOnScreen()
+        assert not frame.search.IsShownOnScreen()
+        frame._select_account("acct_mock", announce=False)
+        frame._load_scope("library:bookmarks", "Bookmarks")
+        selected = frame._current_item().item_id
+        commands = {cmd.command_id for cmd in frame._build_commands()}
+        frame.timelines.SetFocus()
+        frame.set_ui_mode("advanced")
+        app.Yield()
+        assert frame.nav.IsShownOnScreen()
+        assert frame.details.IsShownOnScreen()
+        assert frame.search.IsShownOnScreen()
+        assert not frame.timelines.IsShownOnScreen()
+        assert frame.FindFocus() is frame.nav
+        assert frame.current_scope == "library:bookmarks"
+        assert frame._current_item().item_id == selected
+        assert frame.selected_account_id == "acct_mock"
+        assert a11y.load(frame.data_dir).ui_mode == "advanced"
+        assert commands < {cmd.command_id for cmd in frame._build_commands()}
+        frame.set_ui_mode("standard")
+        app.Yield()
+        assert frame.FindFocus() is frame.timelines
+        assert frame._current_item().item_id == selected
+        assert {cmd.command_id for cmd in frame._build_commands()} == commands
+        assert a11y.load(frame.data_dir).ui_mode == "standard"
+
+        frame.set_ui_mode("advanced")
+        frame.nav.SelectItem(frame._nav_nodes["gh:issues"])
+        assert frame.current_scope == "gh:issues"
+        assert frame.list.GetItemCount() > 0
+        frame.set_ui_mode("standard")
+        assert frame.current_scope == "home:all"
+        assert "gh:issues" not in frame._timeline_scopes
+        frame.cmd_focus_search()
+        assert frame.search.IsShownOnScreen()
+        assert frame.FindFocus() is frame.search
+        frame.search.SetValue("accessibility")
+        frame._run_search()
+        assert frame.current_scope == "discover:search"
+        assert frame.FindFocus() is frame.search
+    finally:
+        frame._on_close(None)
+
+
+def test_preferences_mode_is_saved_only_when_accepted(app, monkeypatch):
+    from quill_social import a11y
+    from quill_social.ui.app import PreferencesDialog, SocialFrame
+
+    frame = SocialFrame()
+    try:
+        for result in (wx.ID_CANCEL, wx.ID_OK):
+            dialog = PreferencesDialog(frame, frame.a11y)
+            dialog.ui_mode.SetSelection(1)
+            monkeypatch.setattr(dialog, "ShowModal", lambda chosen=result: chosen)
+            dialog.run_and_apply(frame)
+            expected = "advanced" if result == wx.ID_OK else "standard"
+            assert frame.a11y.ui_mode == expected
+            assert a11y.load(frame.data_dir).ui_mode == expected
+    finally:
+        frame._on_close(None)
+
+
+def test_enter_views_post_but_respects_existing_remaps(app, monkeypatch):
+    from quill_social.ui.app import SocialFrame
+
+    frame = SocialFrame()
+    try:
+        frame.Show()
+        app.Yield()
+        frame.list.SetFocus()
+        app.Yield()
+        assert frame.FindFocus() is frame.list
+        calls = []
+        monkeypatch.setattr(frame, "cmd_view_post", lambda: calls.append("view"))
+        monkeypatch.setattr(frame, "cmd_reply", lambda: calls.append("reply"))
+        event = wx.KeyEvent(wx.wxEVT_CHAR_HOOK)
+        monkeypatch.setattr(event, "GetKeyCode", lambda: wx.WXK_RETURN)
+        frame._on_char_hook(event)
+        frame.keymap.rebind("reply", "Enter")
+        frame._on_char_hook(event)
+        assert calls == ["view", "reply"]
+    finally:
+        frame._on_close(None)
+
+
+def test_restored_thread_draft_preserves_standard_mode_and_thread_summary(app, monkeypatch):
+    from quill_social.model import Draft
+    from quill_social.ui.app import ComposerDialog, SocialFrame
+
+    frame = SocialFrame()
+    try:
+        draft = frame.store.put_draft(Draft(text="A thread", targets=["acct_mock"], thread_mode=True))
+        seen = []
+        def inspect(dialog):
+            assert dialog.ui_mode == "standard"
+            assert "thread splitting" in dialog.more_options.GetLabel()
+            assert "Thread splitting" in dialog.report.GetValue()
+            dialog.more_options.SetValue(True)
+            dialog._on_more_options()
+            assert dialog.thread_mode.IsShown()
+            assert dialog.thread_mode.GetValue()
+            seen.append(True)
+            return wx.ID_CANCEL
+        monkeypatch.setattr(ComposerDialog, "ShowModal", inspect)
+        frame._open_composer_for_draft(draft.draft_id)
+        assert seen
+        assert frame.store.get_draft(draft.draft_id) is not None
+    finally:
+        frame._on_close(None)
+
+
+def test_standard_menus_posts_label_and_hidden_advanced_tools(app):
+    from quill_social.ui.app import SocialFrame
+
+    frame = SocialFrame()
+    try:
+        def menu_titles():
+            bar = frame.GetMenuBar()
+            return [bar.GetMenuLabelText(i) for i in range(bar.GetMenuCount())]
+        assert menu_titles() == ["File", "Timeline", "Post", "Navigate", "View", "Tools"]
+        assert frame.list.GetName() == "Posts"
+        assert frame.list.GetParent().GetName() == "Posts"
+        assert frame.list.GetParent() is not frame.search.GetParent()
+        assert not hasattr(frame, "more_views")
+        hidden = {"agenda", "queue_schedule", "approvals", "analytics", "plugins", "send_to_quill", "summarize_feed"}
+        assert not hidden.intersection(command.command_id for command in frame._build_commands())
+        # Repeated rebuilding must not accumulate menu handlers or lose tools.
+        for _ in range(3):
+            frame.set_ui_mode("advanced")
+            assert "Studio" in menu_titles()
+            assert hidden <= {command.command_id for command in frame._build_commands()}
+            frame.set_ui_mode("standard")
+            assert menu_titles() == ["File", "Timeline", "Post", "Navigate", "View", "Tools"]
+        calls = []
+        frame.cmd_refresh = lambda: calls.append("refresh")
+        menu = frame.GetMenuBar().GetMenu(1)
+        event = wx.CommandEvent(wx.EVT_MENU.typeId, menu.GetMenuItems()[0].GetId())
+        frame.ProcessEvent(event)
+        assert calls == ["refresh"]
     finally:
         frame._on_close(None)

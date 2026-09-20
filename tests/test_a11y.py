@@ -39,3 +39,10 @@ def test_from_dict_sanitizes():
 def test_corrupt_file_falls_back(tmp_path):
     (tmp_path / a11y.SETTINGS_NAME).write_text("not json", encoding="utf-8")
     assert a11y.load(tmp_path) == A11ySettings()
+def test_interface_mode_defaults_and_invalid_values():
+    from quill_social.a11y import A11ySettings
+
+    assert A11ySettings().ui_mode == "standard"
+    assert A11ySettings.from_dict({}).ui_mode == "standard"
+    assert A11ySettings.from_dict({"ui_mode": "unknown"}).ui_mode == "standard"
+    assert A11ySettings.from_dict({"ui_mode": "advanced"}).ui_mode == "advanced"

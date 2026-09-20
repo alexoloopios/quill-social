@@ -99,6 +99,13 @@ NAV_TREE = [
 ]
 
 
+STANDARD_SCOPES = (
+    "home:all", "home:unread", "attention:mentions", "attention:notifications",
+    "library:bookmarks", "library:favourites", "attention:flagged",
+    "discover:search", "discover:catchup",
+)
+
+
 class SocialFrame(wx.Frame):
     def __init__(self) -> None:
         super().__init__(None, title=__title__, size=(1180, 760))
@@ -130,6 +137,7 @@ class SocialFrame(wx.Frame):
         a11y_mod.apply_to_frame(self, self.a11y)
         self._refresh_from_network(announce=False)
         self._populate_nav()
+        self._apply_ui_mode()
         self._load_scope(self.current_scope, self.current_scope_label)
         self.CreateStatusBar()
         self.SetStatusText("QUILL Social ready. Press F1 for help.")
@@ -197,6 +205,87 @@ class SocialFrame(wx.Frame):
     # -- menu -----------------------------------------------------------------
 
     def _build_menu(self) -> None:
+        previous = self.GetMenuBar()
+        for identifier in getattr(self, "_menu_bindings", []):
+            self.Unbind(wx.EVT_MENU, id=identifier)
+        self._menu_bindings = []
+        if self.a11y.ui_mode == "standard":
+            self._build_standard_menu()
+        else:
+            self._build_advanced_menu()
+        self._menu_mode = self.a11y.ui_mode
+        if previous:
+            previous.Destroy()
+
+    def _build_standard_menu(self) -> None:
+        bar = wx.MenuBar()
+        file_menu = wx.Menu()
+        self._menu_item(file_menu, "Add &Account...\tCtrl+Shift+A", self._on_add_account)
+        self._menu_item(file_menu, "&Preferences...", self._on_preferences)
+        file_menu.AppendSeparator()
+        self._menu_item(file_menu, "E&xit\tAlt+F4", lambda event: self.Close())
+        bar.Append(file_menu, "&File")
+
+        timeline = wx.Menu()
+        self._menu_item(timeline, "&Refresh\tF5", lambda event: self.cmd_refresh())
+        timeline.AppendSeparator()
+        labels = {scope: label for _, _, children in NAV_TREE for label, scope in children}
+        for scope in STANDARD_SCOPES:
+            label = "Home" if scope == "home:all" else labels[scope]
+            self._menu_item(timeline, label, lambda event, dest=scope: self._open_standard_timeline(dest))
+        bar.Append(timeline, "&Timeline")
+
+        post = wx.Menu()
+        for label, handler in (("&New Post\tCtrl+N", self.cmd_compose),
+                               ("&Reply\tCtrl+R", self.cmd_reply), ("&Quote\tCtrl+Q", self.cmd_quote),
+                               ("&Boost / Repost\tCtrl+Shift+R", self.cmd_repost),
+                               ("&Favourite\tCtrl+F", self.cmd_favourite),
+                               ("Boo&kmark\tAlt+B", self.cmd_bookmark),
+                               ("Flag for follow-&up", self.cmd_flag),
+                               ("Mark rea&d\tCtrl+K", self.cmd_mark_read)):
+            self._menu_item(post, label, lambda event, action=handler: action())
+        bar.Append(post, "&Post")
+
+        navigate = wx.Menu()
+        for label, handler in (("Previous &timeline", lambda: self._move_timeline(-1)),
+                               ("Next t&imeline", lambda: self._move_timeline(1)),
+                               ("&Previous post", lambda: self._move_post(-1)),
+                               ("&Next post", lambda: self._move_post(1)),
+                               ("&Conversation\tCtrl+G", self.cmd_open_conversation),
+                               ("Open &links\tCtrl+O", self.cmd_open_links),
+                               ("Play &media\tCtrl+Enter", self.cmd_play_media),
+                               ("&Search\tCtrl+L", self.cmd_focus_search),
+                               ("&Where Am I\tCtrl+Shift+I", self.cmd_where_am_i)):
+            self._menu_item(navigate, label, lambda event, action=handler: action())
+        bar.Append(navigate, "&Navigate")
+
+        view = wx.Menu()
+        self._menu_item(view, "View &post", lambda event: self.cmd_view_post())
+        view.AppendSeparator()
+        self._append_mode_choices(view)
+        bar.Append(view, "&View")
+
+        tools = wx.Menu()
+        for label, handler in (("&Command Center\tCtrl+Shift+C", self.cmd_command_center),
+                               ("&Safety Center", self.cmd_safety_center),
+                               ("&Notification policies", self.cmd_notification_policies),
+                               ("&Outbox", self.cmd_outbox), ("&Drafts", self.cmd_drafts),
+                               ("&Help\tF1", self.cmd_help)):
+            self._menu_item(tools, label, lambda event, action=handler: action())
+        self._menu_item(tools, "&About", self._on_about)
+        bar.Append(tools, "&Tools")
+        self.SetMenuBar(bar)
+
+    def _append_mode_choices(self, menu) -> None:
+        self._mode_items = {}
+        for mode in ("standard", "advanced"):
+            item = menu.AppendRadioItem(wx.ID_ANY, f"{mode.capitalize()} mode")
+            self._mode_items[mode] = item
+            self.Bind(wx.EVT_MENU, lambda event, selected=mode: self.set_ui_mode(selected), item)
+            self._menu_bindings.append(item.GetId())
+            item.Check(mode == self.a11y.ui_mode)
+
+    def _build_advanced_menu(self) -> None:
         bar = wx.MenuBar()
 
         m_file = wx.Menu()
@@ -205,6 +294,12 @@ class SocialFrame(wx.Frame):
         m_file.AppendSeparator()
         self._menu_item(m_file, "E&xit\tAlt+F4", lambda _e: self.Close())
         bar.Append(m_file, "&File")
+
+        m_view = wx.Menu()
+        self._append_mode_choices(m_view)
+        m_view.AppendSeparator()
+        self._menu_item(m_view, "View &post", lambda event: self.cmd_view_post())
+        bar.Append(m_view, "&View")
 
         m_compose = wx.Menu()
         self._menu_item(m_compose, "&New Post\tCtrl+N", lambda _e: self.cmd_compose())
@@ -267,6 +362,7 @@ class SocialFrame(wx.Frame):
     def _menu_item(self, menu, label, handler) -> None:
         item = menu.Append(wx.ID_ANY, label)
         self.Bind(wx.EVT_MENU, handler, item)
+        self._menu_bindings.append(item.GetId())
 
     # -- ui -------------------------------------------------------------------
 
@@ -276,6 +372,7 @@ class SocialFrame(wx.Frame):
 
         # Left: a flat account selector, followed by that account's navigation.
         left = wx.Panel(splitter)
+        self._navigation_panel = left
         lsz = wx.BoxSizer(wx.VERTICAL)
         lsz.Add(wx.StaticText(left, label="&Accounts"), 0, wx.ALL, 4)
         self.accounts = wx.ListBox(left, style=wx.LB_SINGLE, size=(-1, 140))
@@ -288,13 +385,19 @@ class SocialFrame(wx.Frame):
             | wx.TR_LINES_AT_ROOT | wx.TR_FULL_ROW_HIGHLIGHT)
         self.nav.SetName("Navigation")
         lsz.Add(self.nav, 1, wx.EXPAND | wx.ALL, 4)
+        self.timelines = wx.ListBox(left)
+        self.timelines.SetName("Timelines")
+        lsz.Add(self.timelines, 1, wx.EXPAND | wx.ALL, 4)
+        self.timelines.Bind(wx.EVT_LISTBOX, self._on_timeline_changed)
         left.SetSizer(lsz)
 
         # Right: search + list + details.
         right = wx.SplitterWindow(splitter, style=wx.SP_LIVE_UPDATE | wx.SP_3D)
+        self._content_splitter = right
         right.SetMinimumPaneSize(120)
 
         top = wx.Panel(right)
+        self._posts_panel = top
         tsz = wx.BoxSizer(wx.VERTICAL)
         srow = wx.BoxSizer(wx.HORIZONTAL)
         srow.Add(wx.StaticText(top, label="Search:"),
@@ -303,15 +406,33 @@ class SocialFrame(wx.Frame):
         self.search.SetName("Search posts")
         srow.Add(self.search, 1)
         tsz.Add(srow, 0, wx.EXPAND | wx.ALL, 4)
+        self._search_sizer = srow
 
+        posts_region = wx.Panel(top, name="Posts")
+        posts_sizer = wx.BoxSizer(wx.VERTICAL)
+        posts_sizer.Add(wx.StaticText(posts_region, label="Posts"), 0, wx.BOTTOM, 4)
         self.list = wx.ListCtrl(
-            top, style=wx.LC_REPORT | wx.LC_SINGLE_SEL | wx.LC_NO_HEADER)
-        self.list.SetName("Timeline")
+            posts_region, style=wx.LC_REPORT | wx.LC_SINGLE_SEL | wx.LC_NO_HEADER,
+            name="Posts")
+        self.list.SetName("Posts")
         self.list.InsertColumn(0, "Post", width=760)
-        tsz.Add(self.list, 1, wx.EXPAND | wx.ALL, 4)
+        posts_sizer.Add(self.list, 1, wx.EXPAND)
+        posts_region.SetSizer(posts_sizer)
+        tsz.Add(posts_region, 1, wx.EXPAND | wx.ALL, 4)
+        self._standard_actions = wx.Panel(top)
+        actions = wx.BoxSizer(wx.HORIZONTAL)
+        for label, handler in (("Refresh", self.cmd_refresh), ("New Post", self.cmd_compose),
+                               ("Reply", self.cmd_reply), ("View", self.cmd_view_post),
+                               ("Links", self.cmd_open_links)):
+            button = wx.Button(self._standard_actions, label=label)
+            button.Bind(wx.EVT_BUTTON, lambda event, action=handler: action())
+            actions.Add(button, 0, wx.RIGHT, 4)
+        self._standard_actions.SetSizer(actions)
+        tsz.Add(self._standard_actions, 0, wx.ALL, 4)
         top.SetSizer(tsz)
 
         bottom = wx.Panel(right)
+        self._details_panel = bottom
         bsz = wx.BoxSizer(wx.VERTICAL)
         bsz.Add(wx.StaticText(bottom, label="Details"), 0, wx.ALL, 4)
         self.details = wx.TextCtrl(
@@ -329,6 +450,91 @@ class SocialFrame(wx.Frame):
         self.list.Bind(wx.EVT_LIST_ITEM_SELECTED, self._on_item_selected)
         self.list.Bind(wx.EVT_LIST_ITEM_FOCUSED, self._on_item_selected)
         self.search.Bind(wx.EVT_TEXT_ENTER, lambda _e: self._run_search())
+
+    def set_ui_mode(self, mode: str) -> None:
+        if mode not in ("standard", "advanced"):
+            return
+        self.a11y.ui_mode = mode
+        a11y_mod.save(self.data_dir, self.a11y)
+        self._apply_ui_mode()
+        self.announcer.say(f"{mode.capitalize()} mode", "normal")
+
+    def _apply_ui_mode(self) -> None:
+        standard = self.a11y.ui_mode == "standard"
+        if getattr(self, "_menu_mode", None) != self.a11y.ui_mode:
+            self._build_menu()
+        focus = self.FindFocus()
+        self.nav.Show(not standard)
+        self.timelines.Show(standard)
+        self._standard_actions.Show(standard)
+        self._search_sizer.ShowItems(not standard)
+        if standard and self._content_splitter.IsSplit():
+            self._content_splitter.Unsplit(self._details_panel)
+        elif not standard and not self._content_splitter.IsSplit():
+            self._details_panel.Show()
+            self._content_splitter.SplitHorizontally(self._posts_panel, self._details_panel, -220)
+        self._populate_nav()
+        if standard and self.current_scope not in STANDARD_SCOPES:
+            self._open_standard_timeline("home:all")
+        for mode, item in self._mode_items.items():
+            item.Check(mode == self.a11y.ui_mode)
+        self._navigation_panel.Layout()
+        self._posts_panel.Layout()
+        self.Layout()
+        if focus and not focus.IsShownOnScreen() and self.IsShownOnScreen():
+            (self.timelines if standard else self.nav).SetFocus()
+
+    def _refresh_timelines(self) -> None:
+        labels = {scope: label if scope in STANDARD_SCOPES else f"{group}: {label}"
+                  for group, _, children in NAV_TREE for label, scope in children}
+        labels["home:all"] = "Home" if self.selected_account_id else "Unified Home"
+        self._timeline_scopes = list(STANDARD_SCOPES)
+        names = [labels[scope] for scope in self._timeline_scopes]
+        if list(self.timelines.GetStrings()) != names:
+            self.timelines.Set(names)
+        if self.current_scope in self._timeline_scopes:
+            self.timelines.SetSelection(self._timeline_scopes.index(self.current_scope))
+
+    def _on_timeline_changed(self, event) -> None:
+        index = self.timelines.GetSelection()
+        if index != wx.NOT_FOUND:
+            self._load_scope(self._timeline_scopes[index], self.timelines.GetString(index))
+
+    def _open_standard_timeline(self, scope: str) -> None:
+        labels = {key: label for _, _, children in NAV_TREE for label, key in children}
+        label = labels[scope]
+        if scope == "home:all" and self.selected_account_id:
+            label = "Home"
+        self._load_scope(scope, label)
+
+    def _move_timeline(self, delta: int) -> None:
+        current = STANDARD_SCOPES.index(self.current_scope) if self.current_scope in STANDARD_SCOPES else 0
+        index = min(max(current + delta, 0), len(STANDARD_SCOPES) - 1)
+        self._open_standard_timeline(STANDARD_SCOPES[index])
+        self.timelines.SetFocus()
+
+    def _move_post(self, delta: int) -> None:
+        count = self.list.GetItemCount()
+        if count:
+            current = self.list.GetFirstSelected()
+            target = min(max(current + delta, 0), count - 1)
+            if current >= 0:
+                self.list.Select(current, False)
+            self.list.Select(target)
+            self.list.Focus(target)
+            self.list.EnsureVisible(target)
+            self.list.SetFocus()
+
+    def cmd_view_post(self) -> None:
+        item = self._current_item()
+        if item is None:
+            self.announcer.error("Select a post to view.")
+            return
+        self._show_details(item)
+        if self.a11y.ui_mode == "standard":
+            self._show_text("Post details", self.details.GetValue())
+        else:
+            self.details.SetFocus()
 
     def _populate_accounts(self) -> None:
         accounts = self.store.list_accounts()
@@ -381,13 +587,15 @@ class SocialFrame(wx.Frame):
             self.nav.SetItemData(home, ("home:all", home_label))
             account = self.store.get_account(self.selected_account_id) if self.selected_account_id else None
             context = account.label if account else "Unified Home"
-            self.navigation_label.SetLabel(f"Navigation — {context}")
+            pane = "Timelines" if self.a11y.ui_mode == "standard" else "Navigation"
+            self.navigation_label.SetLabel(f"{pane} — {context}")
             self.nav.SetName(f"Navigation for {context}")
             self._pending_nav_scope = self.current_scope
         finally:
             self._updating_navigation = False
         if self.FindFocus() is self.nav:
             self._sync_navigation_selection()
+        self._refresh_timelines()
 
     def _sync_navigation_selection(self) -> None:
         scope = getattr(self, "_pending_nav_scope", None)
@@ -499,6 +707,8 @@ class SocialFrame(wx.Frame):
         field_index = self._field_index
         self.current_scope = scope
         self.current_scope_label = label
+        self._pending_nav_scope = scope
+        self._refresh_timelines()
         if not keep_selection:
             self.details.Clear()
         if scope.startswith("pub:"):
@@ -679,7 +889,8 @@ class SocialFrame(wx.Frame):
 
     def _on_char_hook(self, event: wx.KeyEvent) -> None:
         if event.GetKeyCode() == wx.WXK_F6:
-            panes = [self.accounts, self.nav, self.list, self.details]
+            panes = ([self.accounts, self.timelines, self.list] if self.a11y.ui_mode == "standard"
+                     else [self.accounts, self.nav, self.list, self.details])
             focus = self.FindFocus()
             index = panes.index(focus) if focus in panes else -1
             panes[(index + (-1 if event.ShiftDown() else 1)) % len(panes)].SetFocus()
@@ -687,6 +898,12 @@ class SocialFrame(wx.Frame):
         # Field navigation only when the list has focus.
         if self.FindFocus() is self.list:
             code = event.GetKeyCode()
+            if code == wx.WXK_RETURN and not (event.ControlDown() or event.AltDown() or event.ShiftDown()):
+                mapped = self.keymap.command_for(keymap_mod.chord_from_event(event))
+                if mapped and self._dispatch(mapped):
+                    return
+                self.cmd_view_post()
+                return
             if code == wx.WXK_LEFT:
                 self._announce_field(-1)
                 return
@@ -740,9 +957,6 @@ class SocialFrame(wx.Frame):
 
     def _run_search(self) -> None:
         self.last_search = self.search.GetValue().strip()
-        node = self._nav_nodes.get("discover:search")
-        if node:
-            self.nav.SelectItem(node)
         self._load_scope("discover:search", "Search Results")
 
     # -- commands -------------------------------------------------------------
@@ -903,13 +1117,12 @@ class SocialFrame(wx.Frame):
         self._load_scope(self.current_scope, self.current_scope_label)
 
     def cmd_focus_search(self) -> None:
+        self._search_sizer.ShowItems(True)
+        self._posts_panel.Layout()
         self.search.SetFocus()
         self.announcer.say("Search. Type a query and press Enter.", "normal")
 
     def cmd_catchup(self) -> None:
-        node = self._nav_nodes.get("discover:catchup")
-        if node:
-            self.nav.SelectItem(node)
         self._load_scope("discover:catchup", "Catch Up")
 
     # -- analytics, safety, AI, ecosystem (PRD 33, 27, 21, 20) ----------------
@@ -984,6 +1197,7 @@ class SocialFrame(wx.Frame):
             if draft.content_warning:
                 dlg.cw.SetValue(draft.content_warning)
             dlg.thread_mode.SetValue(draft.thread_mode)
+            dlg._refresh_report()
         except Exception:
             pass
         if dlg.ShowModal() == wx.ID_OK and dlg.result_draft:
@@ -1048,7 +1262,8 @@ class SocialFrame(wx.Frame):
                         + intent.markdown)
 
     def _show_text(self, title: str, text: str) -> None:
-        TextReportDialog(self, title, text).ShowModal()
+        with TextReportDialog(self, title, text) as dialog:
+            dialog.ShowModal()
 
     def cmd_command_center(self) -> None:
         commands = self._build_commands()
@@ -1091,7 +1306,10 @@ class SocialFrame(wx.Frame):
     def _build_commands(self) -> list[Command]:
         has_item = self._current_item() is not None
         km = self.keymap
-        return [
+        commands = [
+            Command("standard_mode", "Switch to Standard mode", lambda: self.set_ui_mode("standard")),
+            Command("advanced_mode", "Switch to Advanced mode", lambda: self.set_ui_mode("advanced")),
+            Command("view_post", "View post", self.cmd_view_post, is_available=lambda: has_item),
             Command("compose", "New post", self.cmd_compose,
                     synonyms=["write", "toot", "skeet"], shortcut=km.chord_for("compose")),
             Command("reply", "Reply", self.cmd_reply, is_available=lambda: has_item,
@@ -1149,6 +1367,11 @@ class SocialFrame(wx.Frame):
                     lambda: self._on_preferences(None)),
             Command("help", "Help", self.cmd_help, shortcut=km.chord_for("help")),
         ]
+        if self.a11y.ui_mode == "standard":
+            advanced = {"send_to_quill", "summarize_feed", "analytics", "plugins",
+                        "agenda", "queue_schedule", "approvals"}
+            return [command for command in commands if command.command_id not in advanced]
+        return commands
 
     # -- dialogs --------------------------------------------------------------
 
@@ -1226,8 +1449,11 @@ class HelpDialog(wx.Dialog):
             "QUILL Social -- keyboard guide",
             "",
             "Accounts: Up/Down selects Unified Home or an account.",
-            "F6 / Shift+F6: move between Accounts, Navigation, Timeline and Details.",
-            "Navigation shows the selected account; expand a section with Right Arrow.",
+            "View menu: switch between Standard and Advanced mode.",
+            "Standard: Accounts, Timelines and Posts, with File, Timeline, Post, Navigate, View and Tools menus.",
+            "Advanced mode shows the publishing, creation and integration tools.",
+            "Advanced: Accounts, Navigation tree, Timeline and Details.",
+            "F6 / Shift+F6: move between the visible panes.",
             "Up/Down: previous/next post.",
             "Left/Right: read the previous/next field of the focused post.",
             "Enter: open the focused post in Details.",
@@ -1528,6 +1754,11 @@ class PreferencesDialog(wx.Dialog):
         super().__init__(parent, title="Preferences")
         self._settings = settings
         sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(wx.StaticText(self, label="Interface &mode:"), 0, wx.ALL, 6)
+        self.ui_mode = wx.Choice(self, choices=["Standard", "Advanced"])
+        self.ui_mode.SetName("Interface mode")
+        self.ui_mode.SetSelection(1 if settings.ui_mode == "advanced" else 0)
+        sizer.Add(self.ui_mode, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 6)
         sizer.Add(wx.StaticText(self, label="Display time &zone:"), 0, wx.ALL, 6)
         self.display_timezone = wx.Choice(self, choices=["System timezone", "UTC"])
         self.display_timezone.SetName("Display time zone")
@@ -1555,6 +1786,7 @@ class PreferencesDialog(wx.Dialog):
 
     def run_and_apply(self, frame) -> None:
         if self.ShowModal() == wx.ID_OK:
+            self._settings.ui_mode = "advanced" if self.ui_mode.GetSelection() == 1 else "standard"
             self._settings.display_timezone = "utc" if self.display_timezone.GetSelection() == 1 else "system"
             self._settings.verbosity = self.verbosity.GetStringSelection()
             self._settings.high_contrast = self.high_contrast.GetValue()
@@ -1563,6 +1795,7 @@ class PreferencesDialog(wx.Dialog):
             a11y_mod.save(frame.data_dir, self._settings)
             frame.announcer.set_verbosity(self._settings.verbosity)
             a11y_mod.apply_to_frame(frame, self._settings)
+            frame._apply_ui_mode()
             frame._load_scope(frame.current_scope, frame.current_scope_label, keep_selection=True)
             frame.announcer.say("Preferences saved.", "normal")
         self.Destroy()

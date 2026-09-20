@@ -39,6 +39,7 @@ class A11ySettings:
     speak_engagement: bool = False
     announce_read_state: bool = True
     display_timezone: Literal["system", "utc"] = "system"
+    ui_mode: Literal["standard", "advanced"] = "standard"
 
     @property
     def text_scale(self) -> float:
@@ -59,6 +60,7 @@ class A11ySettings:
         if not isinstance(idx, int) or not (0 <= idx < len(SCALE_STEPS)):
             idx = DEFAULT_SCALE_INDEX
         return cls(
+            ui_mode=d.get("ui_mode") if d.get("ui_mode") in ("standard", "advanced") else "standard",
             display_timezone=d.get("display_timezone") if d.get("display_timezone") in ("system", "utc") else "system",
             verbosity=v,
             high_contrast=bool(d.get("high_contrast", False)),
