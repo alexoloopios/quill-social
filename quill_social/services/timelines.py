@@ -7,6 +7,7 @@ from quill_social.model import new_id
 TIMELINE_KINDS = {
     "messages": "Direct messages", "list": "List", "user": "User",
     "hashtag": "Hashtag", "local": "Local timeline", "instance": "Instance",
+    "search": "Search",
 }
 
 
@@ -18,13 +19,14 @@ class TimelineSpec:
     value: str = ""
     label: str = ""
     announce: bool = False
+    search_type: str = ""
 
 
 class TimelineLibrary:
     def __init__(self, store):
         self.store = store
 
-    def create(self, account_id, kind, value="", label="", announce=False):
+    def create(self, account_id, kind, value="", label="", announce=False, search_type=""):
         if kind not in TIMELINE_KINDS:
             raise ValueError("Unsupported timeline type.")
         if not self.store.get_account(account_id):
@@ -32,14 +34,18 @@ class TimelineLibrary:
         value = value.strip()
         if kind == "hashtag":
             value = value.lstrip("#")
-        if kind in {"list", "user", "hashtag", "instance"} and not value:
+        if kind in {"list", "user", "hashtag", "instance", "search"} and not value:
             raise ValueError("Enter a value for this timeline.")
+        if kind != "search":
+            search_type = ""
+        elif search_type not in {"", "statuses", "accounts", "hashtags"}:
+            raise ValueError("Choose a valid search type.")
         for spec in self.list(account_id):
-            if (spec.kind, spec.value) == (kind, value):
+            if (spec.kind, spec.value, spec.search_type) == (kind, value, search_type):
                 return spec
         spec = TimelineSpec("timeline:" + new_id("view"), account_id, kind, value,
                             label.strip() or f"{TIMELINE_KINDS[kind]} {value}".strip(),
-                            bool(announce))
+                            bool(announce), search_type)
         self.store.put_document("timeline", spec.scope, asdict(spec))
         return spec
 

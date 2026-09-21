@@ -34,6 +34,18 @@ def test_list_chooser_and_optional_announcements(app):
         dialog.Destroy()
 
 
+def test_recovered_search_dialog_collects_text_and_result_type(app):
+    dialog = timelines.SearchDialog(None)
+    try:
+        with pytest.raises(ValueError, match="Enter text"):
+            dialog.parameters()
+        dialog.query.SetValue("accessibility")
+        dialog.search_by.SetSelection(2)
+        assert dialog.parameters() == ("accessibility", "accounts", "Users")
+    finally:
+        dialog.Destroy()
+
+
 def test_direct_message_failure_preserves_edits_and_retry(app, monkeypatch):
     calls = []
 

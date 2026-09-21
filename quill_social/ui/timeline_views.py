@@ -6,7 +6,7 @@ import wx
 
 from quill_social.adapters.registry import adapter_for
 from quill_social.reading_options import automatic_text
-from quill_social.ui.timelines import DirectMessageDialog, TimelineDialog
+from quill_social.ui.timelines import DirectMessageDialog, SearchDialog, TimelineDialog
 
 
 class TimelineViews:
@@ -75,15 +75,40 @@ class TimelineViews:
 
     def _create_extra_timeline(self, parameters):
         spec = self.timeline_library.create(**parameters)
+        if spec.kind == "search":
+            self._timeline_loaded.discard(spec.scope)
         self._select_account(spec.account_id, announce=False)
         self._populate_nav()
         self._load_scope(spec.scope, spec.label)
+
+    def cmd_search(self):
+        account = self.store.get_account(self.selected_account_id) if self.selected_account_id else None
+        if not account or account.paused or account.network not in {"mastodon", "bluesky"}:
+            accounts = [item for item in self.store.list_accounts(include_paused=False)
+                        if item.network in {"mastodon", "bluesky"}]
+            if not accounts:
+                self.announcer.error("Add a Mastodon or Bluesky account before searching.")
+                return
+            with wx.SingleChoiceDialog(
+                    self, "Choose the account whose service you want to search.",
+                    "Search", [item.full_handle for item in accounts]) as chooser:
+                if chooser.ShowModal() != wx.ID_OK:
+                    return
+                account = accounts[chooser.GetSelection()]
+        with SearchDialog(self) as dialog:
+            if dialog.ShowModal() != wx.ID_OK:
+                return
+            query, search_type, _label = dialog.parameters()
+        self._create_extra_timeline({
+            "account_id": account.account_id, "kind": "search", "value": query,
+            "label": f"Search: {query}", "announce": False, "search_type": search_type,
+        })
 
     def _ensure_extra_loaded(self, scope):
         specs = self._message_specs() if scope == "attention:messages" else [self.timeline_library.get(scope)]
         for spec in specs:
             if spec and spec.scope not in self._timeline_loaded:
-                self._request_extra_timeline(spec)
+                self._request_extra_timeline(spec, announce=spec.kind == "search")
 
     def _request_extra_timeline(self, spec, *, announce=False):
         if self._closing or spec.scope in self._timeline_jobs:
@@ -93,11 +118,19 @@ class TimelineViews:
             return
         self._timeline_jobs.add(spec.scope)
         if announce:
-            self.announcer.say(f"Loading {spec.label}...", "action")
+            if spec.kind == "search":
+                search_label = {"": "all", "statuses": "posts", "accounts": "users",
+                                "hashtags": "hashtags"}[spec.search_type]
+                self.announcer.say(f"Searching {search_label}...", "action")
+            else:
+                self.announcer.say(f"Loading {spec.label}...", "action")
         credentials, limit = self.credentials, self.a11y.timeline_limit
         def worker():
             try:
-                items = adapter_for(account, credentials).fetch_timeline(spec.kind, spec.value, limit=limit)
+                adapter = adapter_for(account, credentials)
+                items = (adapter.search(spec.value, spec.search_type, limit=limit)
+                         if spec.kind == "search"
+                         else adapter.fetch_timeline(spec.kind, spec.value, limit=limit))
                 error = None
             except Exception as exc:
                 items, error = [], str(exc)
@@ -137,7 +170,10 @@ class TimelineViews:
             self._load_scope(self.current_scope, self.current_scope_label, keep_selection=True, announce=False)
 
         if announce:
-            self.announcer.say(f"Refreshed {spec.label}. {len(loaded)} items.", "action")
+            if spec.kind == "search":
+                self.announcer.say(f"Search complete. {len(loaded)} results.", "action")
+            else:
+                self.announcer.say(f"Refreshed {spec.label}. {len(loaded)} items.", "action")
 
     def _poll_extra_timelines(self):
         # Message preferences apply per account even while another account is selected.

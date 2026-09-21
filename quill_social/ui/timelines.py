@@ -6,12 +6,53 @@ import wx
 
 from quill_social.services.timelines import TIMELINE_KINDS
 
+SEARCH_TYPES = (("All", ""), ("Posts", "statuses"),
+                ("Users", "accounts"), ("Hashtags", "hashtags"))
+
+
+class SearchDialog(wx.Dialog):
+    """Recovered-client server search: text followed by a result-type choice."""
+
+    def __init__(self, parent):
+        super().__init__(parent, title="Search")
+        root = wx.BoxSizer(wx.VERTICAL)
+        root.Add(wx.StaticText(self, label="Search &text"), 0, wx.ALL, 8)
+        self.query = wx.TextCtrl(self)
+        root.Add(self.query, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        root.Add(wx.StaticText(self, label="Search &by"), 0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
+        self.search_by = wx.Choice(self, choices=[label for label, _ in SEARCH_TYPES])
+        self.search_by.SetSelection(0)
+        root.Add(self.search_by, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        root.Add(self.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL),
+                 0, wx.ALIGN_RIGHT | wx.ALL, 8)
+        self.SetSizerAndFit(root)
+        self.Bind(wx.EVT_BUTTON, self._accept, id=wx.ID_OK)
+        self.query.SetFocus()
+        self.CentreOnParent()
+
+    def parameters(self):
+        query = self.query.GetValue().strip()
+        if not query:
+            raise ValueError("Enter text to search for.")
+        index = max(0, self.search_by.GetSelection())
+        label, search_type = SEARCH_TYPES[index]
+        return query, search_type, label
+
+    def _accept(self, event):
+        try:
+            self.parameters()
+        except ValueError as exc:
+            wx.MessageBox(str(exc), "Search", wx.OK | wx.ICON_ERROR, self)
+            self.query.SetFocus()
+            return
+        self.EndModal(wx.ID_OK)
+
 
 class TimelineDialog(wx.Dialog):
     def __init__(self, parent, accounts, *, kind="hashtag", account_id=""):
         super().__init__(parent, title="Open Timeline", size=(500, 400))
         self.accounts = list(accounts)
-        self.kinds = [key for key in TIMELINE_KINDS if key != "messages"]
+        self.kinds = [key for key in TIMELINE_KINDS if key not in {"messages", "search"}]
         root = wx.BoxSizer(wx.VERTICAL)
         root.Add(wx.StaticText(self, label="&Account"), 0, wx.ALL, 8)
         self.account = wx.Choice(self, choices=[a.display_name or a.handle for a in self.accounts])

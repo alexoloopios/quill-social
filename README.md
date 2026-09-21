@@ -85,7 +85,12 @@ Standard follows the recovered client's layout: Accounts, a flat Timelines list,
 Posts, and Refresh/New Post/Reply/View/Links buttons. Enter opens the selected
 post in a read-only dialog. Its menu bar is **File, Timeline, Post, Navigate,
 View, Tools**, focused on everyday reading and posting. Search is available
-with Ctrl+L or Navigate. Posts has its own visible label and accessible region.
+with Ctrl+L or Navigate. It uses the recovered client's dialog: enter search
+text, choose All, Posts, Users or Hashtags, and the selected account's service
+opens the results in a closeable timeline. Unified Home asks which account to
+use. Flagged, the old cached Search Results view, and Catch Up remain available
+in Advanced mode without occupying the Standard timeline list. Posts has its
+own visible label and accessible region.
 Advanced publishing, creation and integration tools are hidden from Standard's
 menus and Command Center.
 

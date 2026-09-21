@@ -123,8 +123,7 @@ NAV_TREE = [
 
 STANDARD_SCOPES = (
     "home:all", "home:unread", "attention:mentions", "attention:notifications", "attention:messages",
-    "library:bookmarks", "library:favourites", "attention:flagged",
-    "discover:search", "discover:catchup",
+    "library:bookmarks", "library:favourites",
 )
 
 
@@ -471,7 +470,7 @@ class SocialFrame(TimelineViews, wx.Frame):
                                ("&Conversation\tCtrl+G", self.cmd_open_conversation),
                                ("Open &links\tCtrl+O", self.cmd_open_links),
                                ("Play &media\tCtrl+Enter", self.cmd_play_media),
-                               ("&Search\tCtrl+L", self.cmd_focus_search),
+                               ("&Search\tCtrl+L", self.cmd_search),
                                ("&Where Am I\tCtrl+Shift+I", self.cmd_where_am_i)):
             self._menu_item(navigate, label, lambda event, action=handler: action())
         bar.Append(navigate, "&Navigate")
@@ -1329,7 +1328,7 @@ class SocialFrame(TimelineViews, wx.Frame):
             "command_center": self.cmd_command_center,
             "where_am_i": self.cmd_where_am_i,
             "refresh": self.cmd_refresh,
-            "search": self.cmd_focus_search,
+            "search": self.cmd_search if self.a11y.ui_mode == "standard" else self.cmd_focus_search,
             "help": self.cmd_help,
         }.get(command_id)
         if handler is None:
@@ -1368,8 +1367,10 @@ class SocialFrame(TimelineViews, wx.Frame):
         if item is None:
             self.announcer.error("Select a post to reply to.")
             return
-        if item.remote_id.startswith("instance:"):
-            self.announcer.error("Remote-instance posts are read-only.")
+        if item.remote_id.startswith(("instance:", "search:")):
+            self.announcer.error("This search result is read-only."
+                                 if item.remote_id.startswith("search:")
+                                 else "Remote-instance posts are read-only.")
             return
         if item.visibility == "direct":
             self.cmd_direct_message(item)
@@ -1381,7 +1382,7 @@ class SocialFrame(TimelineViews, wx.Frame):
         if item is None:
             self.announcer.error("Select a post to quote.")
             return
-        if item.visibility == "direct" or item.remote_id.startswith(("instance:", "chat:")):
+        if item.visibility == "direct" or item.remote_id.startswith(("instance:", "chat:", "search:")):
             self.announcer.error("This post cannot be quoted.")
             return
         self._open_composer(quote_of=item.remote_id)
@@ -1493,7 +1494,9 @@ class SocialFrame(TimelineViews, wx.Frame):
         if item is None:
             self.announcer.error("Select a post first.")
             return
-        if column != "flagged" and (item.remote_id.startswith(("instance:", "chat:")) or (column == "reblogged" and item.visibility == "direct")):
+        if item.remote_id.startswith("search:") or (column != "flagged" and (
+                item.remote_id.startswith(("instance:", "chat:"))
+                or (column == "reblogged" and item.visibility == "direct"))):
             self.announcer.error("This action is not available for this post.")
             return
         new_value = not getattr(item, column)
@@ -1581,8 +1584,10 @@ class SocialFrame(TimelineViews, wx.Frame):
         if item is None:
             self.announcer.error("Select a post first.")
             return
-        if item.remote_id.startswith("instance:"):
-            self.announcer.error("Remote-instance posts are read-only. Open the original post to view its conversation.")
+        if item.remote_id.startswith(("instance:", "search:")):
+            self.announcer.error("This result does not have a conversation."
+                                 if item.remote_id.startswith("search:")
+                                 else "Remote-instance posts are read-only. Open the original post to view its conversation.")
             return
         thread = self.store.list_items(
             thread_root=item.thread_root or item.remote_id, account_id=item.account_id, limit=100)
@@ -1881,7 +1886,8 @@ class SocialFrame(TimelineViews, wx.Frame):
                     synonyms=["audio", "video", "player"]),
             Command("refresh", "Refresh", self.cmd_refresh,
                     shortcut=km.chord_for("refresh")),
-            Command("search", "Search", self.cmd_focus_search,
+            Command("search", "Search",
+                    self.cmd_search if self.a11y.ui_mode == "standard" else self.cmd_focus_search,
                     shortcut=km.chord_for("search")),
             Command("where_am_i", "Where am I", self.cmd_where_am_i,
                     synonyms=["context"], shortcut=km.chord_for("where_am_i")),
@@ -1893,7 +1899,7 @@ class SocialFrame(TimelineViews, wx.Frame):
         ]
         if self.a11y.ui_mode == "standard":
             advanced = {"send_to_quill", "summarize_feed", "analytics", "plugins",
-                        "agenda", "queue_schedule", "approvals"}
+                        "agenda", "queue_schedule", "approvals", "catchup"}
             return [command for command in commands if command.command_id not in advanced]
         return commands
 

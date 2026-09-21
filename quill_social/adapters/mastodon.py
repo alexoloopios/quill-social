@@ -354,6 +354,43 @@ class MastodonAdapter(NetworkAdapter):
         except Exception as exc:
             raise _mastodon_error(exc) from exc
 
+    def search(self, query: str, search_type: str = "", *, limit: int = 40) -> list[SocialItem]:
+        query = query.strip()
+        if not query or search_type not in {"", "statuses", "accounts", "hashtags"}:
+            raise AdapterError("Enter search text and choose a valid result type.", kind="validation")
+        try:
+            result = self._require_client().search_v2(
+                query, resolve=True, result_type=search_type or None, limit=limit)
+        except Exception as exc:
+            raise _mastodon_error(exc) from exc
+        items = []
+        if search_type in {"", "statuses"}:
+            items.extend(_status_to_item(row, account_id=self._account_id)
+                         for row in result.get("statuses", []) or [])
+        if search_type in {"", "accounts"}:
+            for account in result.get("accounts", []) or []:
+                handle = _acct_handle(account)
+                display = account.get("display_name", "") or handle
+                note = _html_to_text(account.get("note", "") or "")
+                items.append(SocialItem(
+                    network="mastodon", account_id=self._account_id,
+                    remote_id=f"search:user:{account.get('id') or handle.casefold()}",
+                    uri=account.get("url", "") or "", author_id=str(account.get("id", "") or ""),
+                    author_handle=handle, author_display=display,
+                    text=f"User: {display} {handle}. {note}".strip(),
+                ))
+        if search_type in {"", "hashtags"}:
+            for hashtag in result.get("hashtags", []) or []:
+                name = str(hashtag.get("name", "") or "").lstrip("#")
+                if name:
+                    items.append(SocialItem(
+                        network="mastodon", account_id=self._account_id,
+                        remote_id=f"search:hashtag:{name.casefold()}",
+                        uri=hashtag.get("url", "") or "", author_handle=f"#{name}",
+                        author_display="Hashtag", text=f"Hashtag: #{name}",
+                    ))
+        return items
+
     def save_home_position(self, remote_id: str) -> None:
         try:
             self._require_client().markers_set("home", remote_id)

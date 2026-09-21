@@ -450,13 +450,9 @@ def test_mode_switch_preserves_account_view_post_and_features(app, monkeypatch):
         frame.set_ui_mode("standard")
         assert frame.current_scope == "home:all"
         assert "gh:issues" not in frame._timeline_scopes
-        frame.cmd_focus_search()
-        assert frame.search.IsShownOnScreen()
-        assert frame.FindFocus() is frame.search
-        frame.search.SetValue("accessibility")
-        frame._run_search()
-        assert frame.current_scope == "discover:search"
-        assert frame.FindFocus() is frame.search
+        assert not {"attention:flagged", "discover:search", "discover:catchup"}.intersection(
+            frame._timeline_scopes)
+        assert not frame.search.IsShownOnScreen()
     finally:
         frame._on_close(None)
 
@@ -541,7 +537,8 @@ def test_standard_menus_posts_label_and_hidden_advanced_tools(app):
         assert frame.list.GetParent().GetName() == "Posts"
         assert frame.list.GetParent() is not frame.search.GetParent()
         assert not hasattr(frame, "more_views")
-        hidden = {"agenda", "queue_schedule", "approvals", "analytics", "plugins", "send_to_quill", "summarize_feed"}
+        hidden = {"agenda", "queue_schedule", "approvals", "analytics", "plugins",
+                  "send_to_quill", "summarize_feed", "catchup"}
         assert not hidden.intersection(command.command_id for command in frame._build_commands())
         # Repeated rebuilding must not accumulate menu handlers or lose tools.
         for _ in range(3):

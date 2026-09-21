@@ -12,7 +12,7 @@ def frame(tmp_path, monkeypatch):
     monkeypatch.setenv("QUILLSOCIAL_DATA", str(tmp_path))
     app = wx.App()
     frame = SocialFrame()
-    monkeypatch.setattr(frame, "_request_extra_timeline", lambda spec: None)
+    monkeypatch.setattr(frame, "_request_extra_timeline", lambda spec, **kwargs: None)
     yield frame
     frame._on_close(None)
     app.Destroy()
@@ -85,7 +85,11 @@ def test_messages_first_load_silent_then_new_messages_once(frame, monkeypatch):
     assert not frame.timeline_library.get(spec.scope)
 
 
-@pytest.mark.parametrize("remote_id,visibility", [("chat:conversation:message", "direct"), ("instance:remote.social:42", "public")])
+@pytest.mark.parametrize("remote_id,visibility", [
+    ("chat:conversation:message", "direct"),
+    ("instance:remote.social:42", "public"),
+    ("search:user:7", "public"),
+])
 def test_private_and_remote_rows_cannot_use_public_actions(frame, monkeypatch, remote_id, visibility):
     account = frame.store.list_accounts()[0]
     item = post(account, remote_id, visibility=visibility)
@@ -102,3 +106,40 @@ def test_private_and_remote_rows_cannot_use_public_actions(frame, monkeypatch, r
     assert not frame._pending_reactions
     assert len(private) == (1 if visibility == "direct" else 0)
     assert errors
+
+
+def test_standard_search_creates_closeable_server_timeline(frame, monkeypatch):
+    from quill_social.ui import timeline_views
+
+    account = frame.store.put_account(Account(
+        account_id="search-account", network="mastodon", handle="reader",
+        instance="example.social"))
+    frame._populate_accounts()
+    frame._select_account(account.account_id, announce=False)
+
+    class SearchDialog:
+        def __init__(self, parent):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def ShowModal(self):
+            return wx.ID_OK
+
+        def parameters(self):
+            return "accessibility", "statuses", "Posts"
+
+    monkeypatch.setattr(timeline_views, "SearchDialog", SearchDialog)
+    frame.cmd_search()
+    spec = frame.timeline_library.get(frame.current_scope)
+    assert spec.kind == "search"
+    assert (spec.value, spec.search_type, spec.label) == (
+        "accessibility", "statuses", "Search: accessibility")
+    assert spec.scope in frame._timeline_scopes
+    assert spec.scope in frame._nav_nodes
+    frame.cmd_close_timeline()
+    assert frame.timeline_library.get(spec.scope) is None

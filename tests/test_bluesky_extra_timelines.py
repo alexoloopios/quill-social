@@ -37,6 +37,30 @@ def test_lists_paginate_and_exclude_moderation_lists():
     assert api.timeline_lists() == [("one", "Friends")]
 
 
+def test_search_returns_posts_users_and_hashtag_result():
+    api, client = adapter()
+    post = {"uri": "at://post", "author": {}, "record": {"text": "Hello"}}
+    client.app.bsky.feed.search_posts.return_value = {"posts": [post]}
+    client.app.bsky.actor.search_actors.return_value = {"actors": [{
+        "did": "did:plc:ada", "handle": "ada.test", "display_name": "Ada",
+        "description": "Profile",
+    }]}
+    rows = api.search("#accessibility", limit=12)
+    assert [row.remote_id for row in rows] == [
+        "at://post", "search:user:did:plc:ada", "search:hashtag:accessibility"]
+    assert rows[1].author_handle == "@ada.test"
+    client.app.bsky.feed.search_posts.assert_called_once_with({"q": "#accessibility", "limit": 12})
+    client.app.bsky.actor.search_actors.assert_called_once_with({"q": "#accessibility", "limit": 12})
+
+
+def test_hashtag_search_does_not_call_post_or_user_search():
+    api, client = adapter()
+    rows = api.search("#quill", "hashtags")
+    assert [row.text for row in rows] == ["Hashtag: #quill"]
+    assert not client.app.bsky.feed.search_posts.called
+    assert not client.app.bsky.actor.search_actors.called
+
+
 def test_messages_use_chat_proxy_keep_conversation_and_skip_deleted():
     api, client = adapter()
     chat = client.with_bsky_chat_proxy.return_value.chat.bsky.convo

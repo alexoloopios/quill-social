@@ -129,6 +129,10 @@ class NetworkAdapter(ABC):
     def timeline_lists(self) -> list[tuple[str, str]]:
         raise AdapterError("Lists are not supported for this network.", kind="validation")
 
+    def search(self, query: str, search_type: str = "", *, limit: int = 40) -> list[SocialItem]:
+        """Search the connected service for posts, users, hashtags, or all three."""
+        raise AdapterError("Search is not supported for this network.", kind="validation")
+
     def send_direct_message(self, recipient: str, text: str) -> PublishResult:
         raise AdapterError("Direct messages are not supported for this network.", kind="validation")
 

@@ -34,6 +34,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import quote
 
 from quill_social.adapters.base import (
     AdapterError,
@@ -353,6 +354,44 @@ class BlueskyAdapter(NetworkAdapter):
         except Exception as exc:
             raise _bluesky_error(exc) from exc
         return result
+
+    def search(self, query: str, search_type: str = "", *, limit: int = 40) -> list[SocialItem]:
+        query = query.strip()
+        if not query or search_type not in {"", "statuses", "accounts", "hashtags"}:
+            raise AdapterError("Enter search text and choose a valid result type.", kind="validation")
+        client = self._require_client()
+        items = []
+        try:
+            if search_type in {"", "statuses"}:
+                response = client.app.bsky.feed.search_posts({"q": query, "limit": min(limit, 100)})
+                items.extend(_post_to_item(_as_dict(post), account_id=self._account_id)
+                             for post in _attr(response, "posts", []) or [])
+            if search_type in {"", "accounts"}:
+                response = client.app.bsky.actor.search_actors({"q": query, "limit": min(limit, 100)})
+                for profile in _attr(response, "actors", []) or []:
+                    profile = _as_dict(profile)
+                    handle = _handle(profile)
+                    display = profile.get("display_name") or profile.get("displayName") or handle
+                    description = profile.get("description", "") or ""
+                    did = profile.get("did", "") or handle
+                    items.append(SocialItem(
+                        network="bluesky", account_id=self._account_id,
+                        remote_id=f"search:user:{did}", uri=f"https://bsky.app/profile/{did}",
+                        author_id=did, author_handle=handle, author_display=display,
+                        text=f"User: {display} {handle}. {description}".strip(),
+                    ))
+            if search_type in {"", "hashtags"}:
+                tag = query.lstrip("#").strip()
+                if tag:
+                    items.append(SocialItem(
+                        network="bluesky", account_id=self._account_id,
+                        remote_id=f"search:hashtag:{tag.casefold()}",
+                        uri=f"https://bsky.app/hashtag/{quote(tag)}", author_handle=f"#{tag}",
+                        author_display="Hashtag", text=f"Hashtag: #{tag}",
+                    ))
+        except Exception as exc:
+            raise _bluesky_error(exc) from exc
+        return items
 
     def _chat(self) -> Any:
         # SDK clones the authenticated client and sets atproto-proxy for bsky.chat.

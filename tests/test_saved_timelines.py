@@ -56,3 +56,14 @@ def test_pruned_posts_are_not_returned(store):
     library.store_loaded(spec.scope, [SocialItem(account_id=account.account_id)])
     store.clear_timeline_cache()
     assert library.items(spec.scope) == []
+
+
+def test_search_type_is_persisted_and_part_of_identity(store):
+    account = store.put_account(Account(network="mastodon"))
+    library = TimelineLibrary(store)
+    posts = library.create(account.account_id, "search", "quill", search_type="statuses")
+    users = library.create(account.account_id, "search", "quill", search_type="accounts")
+    assert posts.scope != users.scope
+    assert library.get(posts.scope).search_type == "statuses"
+    assert library.create(account.account_id, "search", "quill",
+                          search_type="statuses").scope == posts.scope

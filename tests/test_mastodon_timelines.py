@@ -48,6 +48,32 @@ def test_lists_and_errors():
         adapter.fetch_timeline("local")
 
 
+def test_search_returns_posts_users_and_hashtags():
+    client = Mock()
+    client.search_v2.return_value = {
+        "statuses": [status("post")],
+        "accounts": [{"id": "7", "acct": "ada@example.social",
+                      "display_name": "Ada", "note": "<p>Profile</p>",
+                      "url": "https://example.social/@ada"}],
+        "hashtags": [{"name": "Accessibility", "url": "https://example.social/tags/accessibility"}],
+    }
+    rows = MastodonAdapter(client=client, account_id="own").search("accessibility", limit=12)
+    assert [row.remote_id for row in rows] == [
+        "post", "search:user:7", "search:hashtag:accessibility"]
+    assert rows[1].text == "User: Ada @ada@example.social. Profile"
+    client.search_v2.assert_called_once_with(
+        "accessibility", resolve=True, result_type=None, limit=12)
+
+
+def test_search_type_is_forwarded_and_validated():
+    client = Mock()
+    client.search_v2.return_value = {"accounts": []}
+    MastodonAdapter(client=client).search("ada", "accounts")
+    assert client.search_v2.call_args.kwargs["result_type"] == "accounts"
+    with pytest.raises(AdapterError):
+        MastodonAdapter(client=client).search("", "statuses")
+
+
 def test_remote_instance_uses_separate_unauthenticated_client(monkeypatch):
     public = Mock()
     public.timeline_local.return_value = [status()]
