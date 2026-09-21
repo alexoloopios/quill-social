@@ -122,7 +122,7 @@ NAV_TREE = [
 
 
 STANDARD_SCOPES = (
-    "home:all", "home:unread", "attention:mentions", "attention:notifications", "attention:messages",
+    "home:all", "attention:mentions", "attention:notifications", "attention:messages",
     "library:bookmarks", "library:favourites",
 )
 

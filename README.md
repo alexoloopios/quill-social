@@ -88,9 +88,9 @@ View, Tools**, focused on everyday reading and posting. Search is available
 with Ctrl+L or Navigate. It uses the recovered client's dialog: enter search
 text, choose All, Posts, Users or Hashtags, and the selected account's service
 opens the results in a closeable timeline. Unified Home asks which account to
-use. Flagged, the old cached Search Results view, and Catch Up remain available
-in Advanced mode without occupying the Standard timeline list. Posts has its
-own visible label and accessible region.
+use. Unread, Flagged, the old cached Search Results view, and Catch Up remain
+available in Advanced mode without occupying the Standard timeline list. Posts
+has its own visible label and accessible region.
 Advanced publishing, creation and integration tools are hidden from Standard's
 menus and Command Center.
 

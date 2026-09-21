@@ -450,8 +450,8 @@ def test_mode_switch_preserves_account_view_post_and_features(app, monkeypatch):
         frame.set_ui_mode("standard")
         assert frame.current_scope == "home:all"
         assert "gh:issues" not in frame._timeline_scopes
-        assert not {"attention:flagged", "discover:search", "discover:catchup"}.intersection(
-            frame._timeline_scopes)
+        assert not {"home:unread", "attention:flagged", "discover:search",
+                    "discover:catchup"}.intersection(frame._timeline_scopes)
         assert not frame.search.IsShownOnScreen()
     finally:
         frame._on_close(None)
