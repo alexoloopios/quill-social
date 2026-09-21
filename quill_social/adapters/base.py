@@ -122,6 +122,16 @@ class NetworkAdapter(ABC):
     def set_favourite(self, remote_id: str, on: bool = True) -> None:
         raise AdapterError("favourite not supported", kind="validation")
 
+    def fetch_timeline(self, kind: str, value: str = "", *, limit: int = 40) -> list[SocialItem]:
+        """Read an additional account timeline where the network supports it."""
+        raise AdapterError("This timeline is not supported for this network.", kind="validation")
+
+    def timeline_lists(self) -> list[tuple[str, str]]:
+        raise AdapterError("Lists are not supported for this network.", kind="validation")
+
+    def send_direct_message(self, recipient: str, text: str) -> PublishResult:
+        raise AdapterError("Direct messages are not supported for this network.", kind="validation")
+
     def set_bookmark(self, remote_id: str, on: bool = True) -> None:
         raise AdapterError("bookmark not supported", kind="validation")
 

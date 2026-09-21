@@ -3,7 +3,7 @@ import re
 import unicodedata
 
 WARNING_MODES = ("text_only", "warning_then_text", "warning_only")
-SPEECH_SCOPES = ("home:all", "attention:mentions", "attention:notifications")
+SPEECH_SCOPES = ("home:all", "attention:mentions", "attention:notifications", "attention:messages")
 
 
 def sanitize_account_options(value):
@@ -66,7 +66,7 @@ def _first_sentence(text):
 
 
 def automatic_text(item, settings, *, scope="home:all", account_label="",
-                   account_count=1, active_account_context=False, notification=None):
+                   account_count=1, active_account_context=False, notification=None, timeline_label=""):
     """Format incoming speech without changing posts or their stored presentation.
 
     ``notification`` is an adapter NotificationEvent; follow events may have no
@@ -102,7 +102,9 @@ def automatic_text(item, settings, *, scope="home:all", account_label="",
     else:
         if item and item.reblog_by:
             author = f"{item.reblog_by} boosted {author}"
-        label = "mention" if scope == "attention:mentions" else "home post"
+        label = ("direct message" if scope == "attention:messages" else
+                 "mention" if scope == "attention:mentions" else
+                 f"post in {timeline_label}" if timeline_label else "home post")
         heading = f"from {author}" if active_account_context else f"{prefix}New {label} from {author}"
     result = f"{heading}: {text}" if text else heading
     return plain_characters(result) if settings.remove_unicode else result

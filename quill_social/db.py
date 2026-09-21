@@ -434,8 +434,14 @@ class SocialStore:
         limit: int = 500,
         offset: int = 0,
         newest_first: bool = True,
+        exclude_timeline_only: bool = False,
+        exclude_direct: bool = False,
     ) -> list[SocialItem]:
         clauses: list[str] = []
+        if exclude_timeline_only:
+            clauses.append("item_id NOT IN (SELECT doc_id FROM documents WHERE kind='timeline-only')")
+        if exclude_direct:
+            clauses.append("visibility != 'direct'")
         params: list[object] = []
         if account_id:
             clauses.append("account_id=?")

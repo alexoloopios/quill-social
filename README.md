@@ -54,6 +54,25 @@ cached posts, search results and publishing entries. Choose Unified Home to
 see all accounts again. Advanced mode retains all existing destinations and tools.
 GitHub and management tools retain their existing workspace-wide behavior.
 
+### Additional timelines and direct messages
+
+Use **Timeline** in Standard mode, or **View** in Advanced mode, to open a user,
+hashtag or list timeline. Mastodon also supports local and remote-instance
+views. Leave the list ID blank to choose from your account's lists. Added
+views are saved per account and can be closed from the same menu. Remote-instance
+views use public access and are read-only.
+
+**Direct messages** appears in the reading navigation. Use **Post > New direct
+message** (Standard) or **Compose > New direct message** (Advanced) to send,
+or Reply on a received message. Mastodon shows the latest message in each
+conversation; Bluesky loads recent chat messages. These views use separate
+caches from Home. F5 refreshes the current added timeline or messages view.
+
+New-view announcements are off initially. Enable them when opening a timeline,
+or use **Toggle timeline announcements** for the current added view. Message
+announcements are enabled per account in **Preferences > Account reading**.
+Background checks run every minute; the first fetch does not read old history.
+
 ### Standard and Advanced modes
 
 Choose **View > Standard mode / Advanced mode**, or **File > Preferences >

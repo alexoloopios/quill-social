@@ -50,6 +50,7 @@ from quill_social.services.settings_backup import create_backup
 from quill_social.services.thread_publisher import publish_thread
 from quill_social.services.thread_splitter import mastodon_counter, split_thread
 from quill_social.services.timeline_export import timeline_text
+from quill_social.services.timelines import TimelineLibrary
 from quill_social.time_display import format_timestamp
 from quill_social.ui.account_preferences import AccountPreferencesDialog
 from quill_social.ui.announce import Announcer
@@ -79,6 +80,7 @@ from quill_social.ui.system_preferences import (
     load_global_bindings,
     save_global_bindings,
 )
+from quill_social.ui.timeline_views import TimelineViews
 from quill_social.whereami import WhereAmI
 
 # Navigation destinations (PRD 9.2). Each is (label, scope_id).
@@ -90,6 +92,7 @@ NAV_TREE = [
     ("Attention", "attention", [
         ("Mentions", "attention:mentions"),
         ("Notifications", "attention:notifications"),
+        ("Direct messages", "attention:messages"),
         ("Flagged", "attention:flagged"),
     ]),
     ("Library", "library", [
@@ -119,17 +122,20 @@ NAV_TREE = [
 
 
 STANDARD_SCOPES = (
-    "home:all", "home:unread", "attention:mentions", "attention:notifications",
+    "home:all", "home:unread", "attention:mentions", "attention:notifications", "attention:messages",
     "library:bookmarks", "library:favourites", "attention:flagged",
     "discover:search", "discover:catchup",
 )
 
 
-class SocialFrame(wx.Frame):
+class SocialFrame(TimelineViews, wx.Frame):
     def __init__(self) -> None:
         super().__init__(None, title=__title__, size=(1180, 760))
         self.data_dir = paths.data_dir()
         self.store = SocialStore(paths.db_path())
+        self.timeline_library = TimelineLibrary(self.store)
+        self._timeline_jobs = set()
+        self._timeline_loaded = set()
         self.a11y = a11y_mod.load(self.data_dir)
         self.keymap = keymap_mod.load(self.data_dir)
         self._backup_settings()
@@ -207,7 +213,8 @@ class SocialFrame(wx.Frame):
             self._populate_accounts()
         scope = state.get("scope", "home:all")
         allowed = {scope_id: label for _, _, children in NAV_TREE for label, scope_id in children}
-        if scope not in allowed or (self.a11y.ui_mode == "standard" and scope not in STANDARD_SCOPES):
+        allowed.update({spec.scope: spec.label for spec in self._extra_timelines()})
+        if scope not in allowed or (self.a11y.ui_mode == "standard" and scope not in (*STANDARD_SCOPES, *(s.scope for s in self._extra_timelines()))):
             scope = "home:all"
         self._load_scope(scope, allowed[scope])
         if not scope.startswith(("pub:", "gh:")):
@@ -400,6 +407,7 @@ class SocialFrame(wx.Frame):
                     "Export of locally cached posts; does not fetch older server history.\n"]
         destinations = [(label, scope) for _, _, children in NAV_TREE
                         for label, scope in children if scope in STANDARD_SCOPES]
+        destinations.extend((spec.label, spec.scope) for spec in self._extra_timelines())
         destinations.extend((folder.name, f"smart:{folder.folder_id}")
                             for folder in self.store.list_folders(kind="smart"))
         for title, scope in destinations:
@@ -440,6 +448,7 @@ class SocialFrame(wx.Frame):
         for scope in ordered_scopes(options, STANDARD_SCOPES):
             label = options.get("labels", {}).get(scope, "Home" if scope == "home:all" else labels[scope])
             self._menu_item(timeline, label, lambda event, dest=scope: self._open_standard_timeline(dest))
+        self._append_timeline_commands(timeline)
         bar.Append(timeline, "&Timeline")
 
         post = wx.Menu()
@@ -451,6 +460,7 @@ class SocialFrame(wx.Frame):
                                ("Flag for follow-&up", self.cmd_flag),
                                ("Mark rea&d\tCtrl+K", self.cmd_mark_read)):
             self._menu_item(post, label, lambda event, action=handler: action())
+        self._menu_item(post, "New direct message...", lambda event: self.cmd_direct_message())
         bar.Append(post, "&Post")
 
         navigate = wx.Menu()
@@ -509,12 +519,14 @@ class SocialFrame(wx.Frame):
         self._append_mode_choices(m_view)
         m_view.AppendSeparator()
         self._menu_item(m_view, "View &post", lambda event: self.cmd_view_post())
+        self._append_timeline_commands(m_view)
         bar.Append(m_view, "&View")
 
         m_compose = wx.Menu()
         self._menu_item(m_compose, "&New Post\tCtrl+N", lambda _e: self.cmd_compose())
         self._menu_item(m_compose, "&Reply\tCtrl+R", lambda _e: self.cmd_reply())
         self._menu_item(m_compose, "&Quote\tCtrl+Q", lambda _e: self.cmd_quote())
+        self._menu_item(m_compose, "New direct message...", lambda event: self.cmd_direct_message())
         bar.Append(m_compose, "&Compose")
 
         m_item = wx.Menu()
@@ -718,7 +730,8 @@ class SocialFrame(wx.Frame):
         labels["home:all"] = "Home" if self.selected_account_id else "Unified Home"
         options = self._navigation_options()
         labels.update(options.get("labels", {}))
-        self._timeline_scopes = ordered_scopes(options, STANDARD_SCOPES)
+        labels.update({spec.scope: spec.label for spec in self._extra_timelines()})
+        self._timeline_scopes = ordered_scopes(options, STANDARD_SCOPES) + [spec.scope for spec in self._extra_timelines()]
         names = [labels[scope] for scope in self._timeline_scopes]
         if list(self.timelines.GetStrings()) != names:
             self.timelines.Set(names)
@@ -732,6 +745,7 @@ class SocialFrame(wx.Frame):
 
     def _open_standard_timeline(self, scope: str) -> None:
         labels = {key: label for _, _, children in NAV_TREE for label, key in children}
+        labels.update({spec.scope: spec.label for spec in self._extra_timelines()})
         label = labels[scope]
         if scope == "home:all" and self.selected_account_id:
             label = "Home"
@@ -802,13 +816,14 @@ class SocialFrame(wx.Frame):
         self._updating_navigation = True
         try:
             options = self._navigation_options()
-            menu_layout = (ordered_scopes(options, STANDARD_SCOPES), dict(options.get("labels", {})))
-            if getattr(self, "_menu_mode", None) == "standard" and menu_layout != getattr(self, "_timeline_menu_layout", None):
+            menu_layout = (ordered_scopes(options, STANDARD_SCOPES), dict(options.get("labels", {})), [(s.scope, s.label) for s in self._extra_timelines()])
+            if menu_layout != getattr(self, "_timeline_menu_layout", None):
                 self._timeline_menu_layout = menu_layout
                 self._build_menu()
             layout = [(label, group, [(options.get("labels", {}).get(scope, dict((s, n) for n, s in children)[scope]), scope)
                                      for scope in ordered_scopes(options, [s for _, s in children])])
                       for label, group, children in NAV_TREE]
+            layout.append(("Additional timelines", "additional", [(s.label, s.scope) for s in self._extra_timelines()]))
             if not getattr(self, "_nav_nodes", None) or layout != getattr(self, "_nav_layout", None):
                 self.nav.DeleteAllItems()
                 self._nav_layout = layout
@@ -862,6 +877,7 @@ class SocialFrame(wx.Frame):
     def _poll_announcements(self, event=None) -> None:
         if self._closing or self._refresh_running:
             return
+        self._poll_extra_timelines()
         enabled = any(self.a11y.account_options.get(account.account_id, {}).get("speech_timelines")
                       for account in self.store.list_accounts(include_paused=False))
         if enabled:
@@ -905,7 +921,9 @@ class SocialFrame(wx.Frame):
             if key not in existing:
                 new_items.append(item)
                 existing.add(key)
-            self.store.upsert_item(item)
+            stored = self.store.upsert_item(item)
+            if key in result.home_keys:
+                self.store.delete_document("timeline-only", stored.item_id)
         self._announce_updates(result, new_items, enabled=announce or automatic)
         if result.errors:
             self.announcer.error("\n".join(result.errors))
@@ -923,7 +941,9 @@ class SocialFrame(wx.Frame):
             if key not in existing:
                 new_items.append(item)
                 existing.add(key)
-            self.store.upsert_item(item)
+            stored = self.store.upsert_item(item)
+            if key in result.home_keys:
+                self.store.delete_document("timeline-only", stored.item_id)
         if not self.current_scope.startswith(("pub:", "gh:")):
             self._load_scope(self.current_scope, self.current_scope_label, keep_selection=True, announce=announce)
         # A remote marker only restores selection when the user has not started reading.
@@ -951,6 +971,8 @@ class SocialFrame(wx.Frame):
         foreground = bool(self.IsActive() and focus and (focus == self or self.IsDescendant(focus)))
 
         def speak(item, account_id, scope, event=None):
+            if item and item.visibility == "direct":
+                return False
             options = self.a11y.account_options.get(account_id, {})
             account = accounts.get(account_id)
             if (not enabled or account_id not in self._announcement_ready or not account
@@ -999,6 +1021,11 @@ class SocialFrame(wx.Frame):
 
     def _scope_items(self, scope: str, *, limit: int | None = None) -> list:
         limit = self.a11y.timeline_display_limit if limit is None else limit
+        if scope == "attention:messages" or self.timeline_library.get(scope):
+            specs = self._message_specs() if scope == "attention:messages" else [self.timeline_library.get(scope)]
+            rows = {item.item_id: item for spec in specs for item in self.timeline_library.items(spec.scope)}
+            result = sorted(rows.values(), key=lambda item: item.created_at, reverse=True)
+            return result if limit < 0 else result[:limit]
         def items(**filters):
             return self.store.list_items(account_id=self.selected_account_id, limit=limit, **filters)
         if scope == "home:all":
@@ -1008,16 +1035,16 @@ class SocialFrame(wx.Frame):
                 if source not in {"home:all", "home:unread", "attention:mentions", "attention:notifications",
                                   "attention:flagged", "library:bookmarks", "library:favourites"}:
                     continue
-                for item in (items() if source == "home:all" else self._scope_items(source, limit=limit)):
+                for item in (items(exclude_timeline_only=True, exclude_direct=True) if source == "home:all" else self._scope_items(source, limit=limit)):
                     merged[item.item_id] = item
             result = sorted(merged.values(), key=lambda item: item.created_at, reverse=True)
             return result if limit < 0 else result[:limit]
         if scope == "home:unread":
-            return items(unread_only=True)
+            return items(unread_only=True, exclude_timeline_only=True, exclude_direct=True)
         if scope == "attention:mentions":
-            return [it for it in items() if self._mentions_account(it)]
+            return [it for it in items(exclude_direct=True) if self._mentions_account(it)]
         if scope == "attention:notifications":
-            return [it for it in items()
+            return [it for it in items(exclude_direct=True)
                     if self._mentions_account(it) or it.is_reply]
         if scope == "attention:flagged":
             return items(flagged=True)
@@ -1040,7 +1067,7 @@ class SocialFrame(wx.Frame):
 
     def _catchup_items(self, *, limit: int | None = None) -> list:
         limit = self.a11y.timeline_display_limit if limit is None else limit
-        items = self.store.list_items(account_id=self.selected_account_id, limit=limit)
+        items = self.store.list_items(account_id=self.selected_account_id, limit=limit, exclude_timeline_only=True, exclude_direct=True)
         items = catchup_svc.collapse_reposts(items)
         items = catchup_svc.collapse_cross_network(items)
         return items
@@ -1061,6 +1088,7 @@ class SocialFrame(wx.Frame):
         if scope.startswith("gh:"):
             self._load_github(scope, label)
             return
+        self._ensure_extra_loaded(scope)
         self._items = self._scope_items(scope)
         if self.a11y.reverse_timelines:
             self._items.reverse()
@@ -1315,7 +1343,7 @@ class SocialFrame(wx.Frame):
         if not data:
             return
         scope, label = data
-        if scope in ("home", "attention", "library", "publishing", "discover", "github"):
+        if scope in ("home", "attention", "library", "publishing", "discover", "github", "additional"):
             return  # parent header, not a feed
         self._load_scope(scope, label)
 
@@ -1333,12 +1361,21 @@ class SocialFrame(wx.Frame):
         if item is None:
             self.announcer.error("Select a post to reply to.")
             return
+        if item.remote_id.startswith("instance:"):
+            self.announcer.error("Remote-instance posts are read-only.")
+            return
+        if item.visibility == "direct":
+            self.cmd_direct_message(item)
+            return
         self._open_composer(reply_to=item)
 
     def cmd_quote(self) -> None:
         item = self._current_item()
         if item is None:
             self.announcer.error("Select a post to quote.")
+            return
+        if item.visibility == "direct" or item.remote_id.startswith(("instance:", "chat:")):
+            self.announcer.error("This post cannot be quoted.")
             return
         self._open_composer(quote_of=item.remote_id)
 
@@ -1449,6 +1486,9 @@ class SocialFrame(wx.Frame):
         if item is None:
             self.announcer.error("Select a post first.")
             return
+        if column != "flagged" and (item.remote_id.startswith(("instance:", "chat:")) or (column == "reblogged" and item.visibility == "direct")):
+            self.announcer.error("This action is not available for this post.")
+            return
         new_value = not getattr(item, column)
         key = (item.item_id, column)
         if key in self._pending_reactions:
@@ -1534,8 +1574,11 @@ class SocialFrame(wx.Frame):
         if item is None:
             self.announcer.error("Select a post first.")
             return
+        if item.remote_id.startswith("instance:"):
+            self.announcer.error("Remote-instance posts are read-only. Open the original post to view its conversation.")
+            return
         thread = self.store.list_items(
-            thread_root=item.thread_root or item.remote_id, limit=100)
+            thread_root=item.thread_root or item.remote_id, account_id=item.account_id, limit=100)
         if not thread:
             thread = [item]
         self._items = sorted(thread, key=lambda x: x.created_at)
@@ -1571,6 +1614,11 @@ class SocialFrame(wx.Frame):
             self.announcer.error("Could not open link. Check your default browser.")
 
     def cmd_refresh(self) -> None:
+        if self.current_scope == "attention:messages" or self.timeline_library.get(self.current_scope):
+            specs = self._message_specs() if self.current_scope == "attention:messages" else [self.timeline_library.get(self.current_scope)]
+            for spec in specs:
+                self._request_extra_timeline(spec, announce=True)
+            return
         self._refresh_from_network(announce=True)
         self._load_scope(self.current_scope, self.current_scope_label)
 
@@ -1708,7 +1756,7 @@ class SocialFrame(wx.Frame):
             self.announcer.error("Select a post first.")
             return
         thread = self.store.list_items(
-            thread_root=item.thread_root or item.remote_id, limit=100) or [item]
+            thread_root=item.thread_root or item.remote_id, account_id=item.account_id, limit=100) or [item]
         thread = sorted(thread, key=lambda x: x.created_at)
         intent = ecosystem_svc.send_to_quill(thread, title=f"Thread by {item.author_display}")
         export_dir = self.data_dir / "exports"
@@ -1767,6 +1815,10 @@ class SocialFrame(wx.Frame):
         commands = [
             Command("repeat_announcement", "Repeat last announcement", self.announcer.repeat_last,
                     shortcut=km.chord_for("repeat_announcement")),
+            Command("direct_message", "New direct message", self.cmd_direct_message),
+            Command("open_timeline", "Open additional timeline", self.cmd_open_timeline),
+            Command("close_timeline", "Close added timeline", self.cmd_close_timeline),
+            Command("timeline_announcements", "Toggle timeline announcements", self.cmd_toggle_timeline_announcements),
             Command("edit_profile", "Edit my profile", self.cmd_edit_profile),
             Command("create_settings_backup", "Create settings backup", self.cmd_create_settings_backup),
             Command("restore_settings_backup", "Restore settings backup", self.cmd_restore_settings_backup),

@@ -26,7 +26,7 @@ class AccountReadingPanel(ScrolledPanel):
         sizer.Add(self.sync, 0, wx.ALL, 6)
         sizer.Add(wx.StaticText(self, label="Announce new items when refreshing:"), 0, wx.ALL, 6)
         self.speech = {}
-        for scope, title in zip(SPEECH_SCOPES, ("Home", "Mentions", "Notifications"), strict=True):
+        for scope, title in zip(SPEECH_SCOPES, ("Home", "Mentions", "Notifications", "Direct messages"), strict=True):
             control = wx.CheckBox(self, label=title)
             self.speech[scope] = control
             sizer.Add(control, 0, wx.ALL, 6)

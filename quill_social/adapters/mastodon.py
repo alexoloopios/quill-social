@@ -33,6 +33,7 @@ import re
 from datetime import UTC, datetime
 from html import unescape
 from typing import Any
+from urllib.parse import urlsplit
 
 from quill_social.adapters.base import (
     AdapterError,
@@ -283,6 +284,69 @@ class MastodonAdapter(NetworkAdapter):
         except Exception as exc:  # noqa: BLE001 -- normalized below
             raise _mastodon_error(exc) from exc
         return [_status_to_item(s, account_id=self._account_id) for s in statuses or []]
+
+    def timeline_lists(self) -> list[tuple[str, str]]:
+        try:
+            return [(str(row["id"]), str(row.get("title") or "Untitled list"))
+                    for row in self._require_client().lists() or []]
+        except Exception as exc:  # noqa: BLE001
+            raise _mastodon_error(exc) from exc
+
+    def fetch_timeline(self, kind: str, value: str = "", *, limit: int = 40) -> list[SocialItem]:
+        client = self._require_client()
+        value = value.strip()
+        if kind in {"list", "user", "hashtag", "instance"} and not value:
+            raise AdapterError("Enter a timeline name or address.", kind="validation")
+        try:
+            if kind == "messages":
+                rows = [row.get("last_status") for row in client.conversations(limit=limit) or []]
+                rows = [row for row in rows if row and row.get("visibility") == "direct"]
+            elif kind == "list":
+                rows = client.timeline_list(value, limit=limit)
+            elif kind == "user":
+                account = client.account_lookup(value.lstrip("@"))
+                rows = client.account_statuses(account["id"], limit=limit)
+            elif kind == "hashtag":
+                tag = value.lstrip("#")
+                if not tag or any(c.isspace() for c in tag):
+                    raise AdapterError("Enter a single hashtag.", kind="validation")
+                rows = client.timeline_hashtag(tag, limit=limit)
+            elif kind == "local":
+                rows = client.timeline_local(limit=limit)
+            elif kind == "instance":
+                address = urlsplit(value if "://" in value else "https://" + value)
+                if (address.scheme != "https" or not address.hostname or address.username
+                        or address.password or address.path not in {"", "/"}
+                        or address.query or address.fragment):
+                    raise AdapterError("Enter an HTTPS instance address without a path.", kind="validation")
+                # This separate public session must never receive the account's token.
+                from mastodon import Mastodon
+                public = Mastodon(api_base_url="https://" + address.netloc, request_timeout=30)
+                rows = public.timeline_local(limit=limit)
+            else:
+                raise AdapterError("Unknown timeline type.", kind="validation")
+        except AdapterError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise _mastodon_error(exc) from exc
+        items = [_status_to_item(row, account_id=self._account_id) for row in rows or []]
+        if kind == "instance":
+            for item in items:
+                item.remote_id = f"instance:{address.netloc.lower()}:{item.remote_id}"
+        return items
+
+    def send_direct_message(self, recipient: str, text: str) -> PublishResult:
+        recipient = recipient.strip().lstrip("@")
+        if not re.fullmatch(r"[\w.-]+(?:@[\w.-]+(?::\d+)?)?", recipient) or not text.strip():
+            raise AdapterError("Enter a recipient handle and message.", kind="validation")
+        client = self._require_client()
+        try:
+            account = client.account_lookup(recipient)
+            handle = str(account.get("acct") or recipient)
+        except Exception as exc:  # noqa: BLE001
+            raise _mastodon_error(exc) from exc
+        # Direct visibility is explicit, with no fallback to public publishing.
+        return self.publish(PublishRequest(text=f"@{handle} {text.strip()}", visibility="direct"))
 
     def home_position(self) -> str:
         try:
