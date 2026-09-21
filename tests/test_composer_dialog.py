@@ -314,6 +314,19 @@ def test_standard_schedule_action_remains_unavailable_with_options_expanded(app,
         dlg.Destroy()
 
 
+def test_quote_dialog_has_context_and_initial_link_text(app):
+    accounts = _accounts()
+    dlg = ComposerDialog(
+        None, accounts, _caps(accounts), quote_mode=True,
+        initial_text="RE: https://example.social/post ")
+    try:
+        assert dlg.GetTitle() == "Quote"
+        assert dlg.editor.GetValue() == "RE: https://example.social/post "
+        assert dlg.editor.GetInsertionPoint() == len(dlg.editor.GetValue())
+    finally:
+        dlg.Destroy()
+
+
 def test_standard_thread_draft_can_publish_and_be_saved(app, monkeypatch):
     accounts = _accounts()
     dlg = ComposerDialog(None, accounts, _caps(accounts))

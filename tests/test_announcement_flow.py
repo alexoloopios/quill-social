@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from quill_social.adapters.base import AdapterError, NotificationEvent
+from quill_social.services.notifications import NotificationPolicy, save_policy
 from quill_social.services.refresh import RefreshResult
 
 wx = pytest.importorskip("wx")
@@ -91,6 +92,22 @@ def test_first_load_seeds_notifications_without_reading_history(frame, monkeypat
     frame._finish_refresh(result, False, True)
     automatic = [text for text, level in spoken if level == "automatic"]
     assert len(automatic) == 1 and "New follower" in automatic[0] and "Old follower" not in automatic[0]
+
+
+def test_notification_speech_policy_is_applied(frame, monkeypatch):
+    item = frame._current_item()
+    frame.a11y.account_options[item.account_id] = {
+        "speech_timelines": ["attention:notifications"]}
+    frame._announcement_ready.add(item.account_id)
+    save_policy(frame.store, NotificationPolicy(
+        account_id=item.account_id, category="favourite", speak=False))
+    result = RefreshResult(events=[NotificationEvent(
+        "silent-like", "favourite", "Ada", item, item.account_id)])
+    spoken = []
+    monkeypatch.setattr(
+        frame.announcer, "say", lambda text, level, **kw: spoken.append((text, level)))
+    frame._announce_updates(result, [], enabled=True)
+    assert not spoken
 
 
 def test_poll_only_runs_for_enabled_accounts_and_never_overlaps(frame, monkeypatch):

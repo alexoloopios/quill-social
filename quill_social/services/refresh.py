@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from quill_social.adapters.base import AdapterError, NotificationEvent
 from quill_social.adapters.registry import adapter_for
 from quill_social.model import SocialItem
+from quill_social.services.notifications import NotificationItem, from_event
 
 
 @dataclass
@@ -17,6 +18,8 @@ class RefreshResult:
     notification_keys: set[tuple[str, str]] = field(default_factory=set)
     home_keys: set[tuple[str, str]] = field(default_factory=set)
     events: list[NotificationEvent] = field(default_factory=list)
+    notifications: list[NotificationItem] = field(default_factory=list)
+    capabilities: dict[str, object] = field(default_factory=dict)
     successful_accounts: set[str] = field(default_factory=set)
 
 
@@ -43,6 +46,13 @@ def fetch_accounts(accounts, credentials, *, limit: int = 60, sync_accounts=()) 
                     event.item.account_id = account.account_id
                     result.items.append(event.item)
                     result.notification_keys.add((account.account_id, event.item.remote_id))
+                result.notifications.append(from_event(event, account.network))
+            probe = getattr(adapter, "probe_capabilities", None)
+            if probe:
+                try:
+                    result.capabilities[account.account_id] = probe()
+                except Exception:
+                    pass
             result.successful_accounts.add(account.account_id)
             if account.account_id in sync_accounts and account.network == "mastodon":
                 result.home_positions[account.account_id] = adapter.home_position()

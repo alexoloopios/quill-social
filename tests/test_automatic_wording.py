@@ -32,7 +32,9 @@ def test_home_speech_retains_whole_post_and_describes_account_context():
     ("favourite", "New notification from Bob favourited Alice: Hello."),
     ("reblog", "New notification from Bob boosted Alice: Hello."),
     ("mention", "New notification from Bob: Hello."),
-    ("poll", "New notification from Bob: has a poll update: Hello."),
+    ("poll", "New notification. A poll from Bob has ended: Hello."),
+    ("quote", "New notification from Bob quoted Alice: Hello."),
+    ("quoted_update", "New notification from Bob: edited a post you quoted: Hello."),
 ])
 def test_notification_actor_and_action_are_distinct_from_target_post(kind, expected):
     item = post(text="Hello. More detail.")

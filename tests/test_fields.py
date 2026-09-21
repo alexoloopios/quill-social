@@ -20,6 +20,22 @@ def test_render_row_default_is_terse():
     assert "favourites" not in row
 
 
+def test_render_row_pauses_between_author_and_leading_mention():
+    item = _item()
+    item.text = "@grace Thanks for the update"
+    row = render_row(item, FieldProfile(), settings=A11ySettings())
+    assert row.startswith("Ada: @grace Thanks for the update")
+
+
+def test_render_row_uses_author_colon_before_content_warning():
+    item = _item(content_warning="Spoilers")
+    item.text = "@grace Details"
+    settings = A11ySettings(
+        account_options={item.account_id: {"content_warning_mode": "warning_then_text"}})
+    row = render_row(item, FieldProfile(), settings=settings)
+    assert row.startswith("Ada: content warning: Spoilers. @grace Details")
+
+
 def test_render_row_speaks_engagement_when_enabled():
     it = _item()
     s = A11ySettings(speak_engagement=True)

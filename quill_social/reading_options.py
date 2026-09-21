@@ -79,18 +79,24 @@ def automatic_text(item, settings, *, scope="home:all", account_label="",
     author = ((item.author_display or item.author_handle) if item else "") or "Unknown"
     prefix = f"{account_label}. " if account_count > 1 and account_label and not active_account_context else ""
     if scope == "attention:notifications":
+        notification_heading = ""
         if notification is not None:
             actor = notification.actor_name or notification.actor_handle or "Unknown"
             kind = notification.kind
             action = {
                 "favourite": "favourited", "like": "liked", "reblog": "boosted",
                 "repost": "reposted", "follow": "followed you",
-                "follow_request": "requested to follow you", "poll": "has a poll update",
+                "follow_request": "requested to follow you",
                 "status": "posted", "update": "edited a post", "quote": "quoted",
+                "quoted_update": "edited a post you quoted",
+                "moderation_warning": "sent a moderation warning to",
+                "severed_relationships": "reported a severed relationship with",
             }.get(kind, kind.replace("_", " ") or "notified")
             if kind in {"follow", "follow_request"}:
                 author, text = actor, action
             elif kind == "poll":
+                notification_heading = f"{prefix}New notification. A poll from {actor} has ended"
+            elif kind == "quoted_update":
                 author, text = actor, f"{action}: {text}".rstrip(": ")
             elif kind in {"mention", "reply"}:
                 author = actor
@@ -98,7 +104,7 @@ def automatic_text(item, settings, *, scope="home:all", account_label="",
                 author = f"{actor} {action} {author if item else 'you'}"
         if settings.notification_first_sentence:
             text = _first_sentence(text)
-        heading = f"{prefix}New notification from {author}"
+        heading = notification_heading or f"{prefix}New notification from {author}"
     else:
         if item and item.reblog_by:
             author = f"{item.reblog_by} boosted {author}"

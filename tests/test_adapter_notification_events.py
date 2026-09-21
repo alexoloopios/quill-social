@@ -33,6 +33,19 @@ def test_mastodon_notification_identity_actor_and_statusless_follow():
     assert len(adapter.notifications()) == 3
 
 
+def test_mastodon_statusless_moderation_notification_keeps_its_text():
+    notes = [{
+        "id": "warning", "type": "moderation_warning",
+        "created_at": "2026-09-20T10:00:00Z",
+        "account": {},
+        "moderation_warning": {"action": "disable", "text": "Please review our rules."},
+    }]
+    event = MastodonAdapter(account_id="mine", client=SimpleNamespace(
+        notifications=lambda **kw: notes)).notification_events()[0]
+    assert event.item is None
+    assert event.text == "Please review our rules."
+
+
 def test_bluesky_notifications_use_notification_endpoint_and_keep_reactions():
     subject = "at://me/app.bsky.feed.post/original"
     actor = {"handle": "ada.bsky.social", "display_name": "Ada"}

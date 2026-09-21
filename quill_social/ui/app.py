@@ -41,6 +41,7 @@ from quill_social.security.credentials import (
 from quill_social.services import analytics as analytics_svc
 from quill_social.services import catchup as catchup_svc
 from quill_social.services import ecosystem as ecosystem_svc
+from quill_social.services import notifications as notification_svc
 from quill_social.services import smartfolder as smartfolder_svc
 from quill_social.services.ai import accessibility as ai_a11y
 from quill_social.services.ai import understand as ai_understand
@@ -777,7 +778,8 @@ class SocialFrame(TimelineViews, wx.Frame):
             return
         self._show_details(item)
         if self.a11y.ui_mode == "standard":
-            self._show_text("Post details", self.details.GetValue())
+            title = "Notification details" if self._is_notification_row(item) else "Post details"
+            self._show_text(title, self.details.GetValue())
         else:
             self.details.SetFocus()
 
@@ -923,6 +925,9 @@ class SocialFrame(TimelineViews, wx.Frame):
             stored = self.store.upsert_item(item)
             if key in result.home_keys:
                 self.store.delete_document("timeline-only", stored.item_id)
+        notification_svc.save_items(self.store, getattr(result, "notifications", []))
+        for account_id, caps in getattr(result, "capabilities", {}).items():
+            self.caps.set(account_id, caps)
         self._announce_updates(result, new_items, enabled=announce or automatic)
         if result.errors:
             self.announcer.error("\n".join(result.errors))
@@ -943,6 +948,9 @@ class SocialFrame(TimelineViews, wx.Frame):
             stored = self.store.upsert_item(item)
             if key in result.home_keys:
                 self.store.delete_document("timeline-only", stored.item_id)
+        notification_svc.save_items(self.store, getattr(result, "notifications", []))
+        for account_id, caps in getattr(result, "capabilities", {}).items():
+            self.caps.set(account_id, caps)
         if not self.current_scope.startswith(("pub:", "gh:")):
             self._load_scope(self.current_scope, self.current_scope_label, keep_selection=True, announce=announce)
         # A remote marker only restores selection when the user has not started reading.
@@ -978,6 +986,13 @@ class SocialFrame(TimelineViews, wx.Frame):
                     or account.paused or options.get("speech_muted", False)
                     or scope not in options.get("speech_timelines", [])):
                 return False
+            if event is not None:
+                category = notification_svc.normalize_category(event.kind)
+                policy = notification_svc.get_policy(self.store, account_id, category)
+                if policy is not None:
+                    notification = notification_svc.from_event(event, account.network)
+                    if not notification_svc.classify(policy, notification).speak:
+                        return False
             messages.append(automatic_text(item, self.a11y, scope=scope, notification=event,
                                           account_label=account.label, account_count=len(accounts),
                                           active_account_context=foreground and self.selected_account_id == account_id))
@@ -1043,8 +1058,11 @@ class SocialFrame(TimelineViews, wx.Frame):
         if scope == "attention:mentions":
             return [it for it in items(exclude_direct=True) if self._mentions_account(it)]
         if scope == "attention:notifications":
-            return [it for it in items(exclude_direct=True)
-                    if self._mentions_account(it) or it.is_reply]
+            rows = notification_svc.list_items(
+                self.store, self.selected_account_id, limit=-1)
+            result = [notification_svc.to_social_item(row) for row in rows
+                      if row.category not in {"mention", "reply"}]
+            return result if limit < 0 else result[:limit]
         if scope == "attention:flagged":
             return items(flagged=True)
         if scope == "library:bookmarks":
@@ -1199,6 +1217,26 @@ class SocialFrame(TimelineViews, wx.Frame):
             return self._items[idx]
         return None
 
+    @staticmethod
+    def _is_notification_row(item) -> bool:
+        return bool(item and item.item_id.startswith("notification:"))
+
+    def _notification_subject(self, item):
+        """Resolve the cached post associated with a notification row."""
+        if not self._is_notification_row(item):
+            return item
+        data = self.store.get_document(notification_svc.ITEM_KIND, item.item_id)
+        if not data:
+            return None
+        note = notification_svc.NotificationItem.from_dict(data)
+        if note.subject_item_id:
+            subject = self.store.get_item(note.subject_item_id)
+            if subject is not None:
+                return subject
+        return next((candidate for candidate in self.store.list_items(
+            account_id=note.account_id, limit=-1)
+            if candidate.remote_id == note.subject_id), None)
+
     def _on_item_selected(self, event) -> None:
         if self._closing:
             return
@@ -1207,7 +1245,10 @@ class SocialFrame(TimelineViews, wx.Frame):
         if item is not None:
             self._show_details(item)
             if not item.read:
-                self.store.set_read(item.item_id, True)
+                if self._is_notification_row(item):
+                    notification_svc.mark_read(self.store, item.item_id)
+                else:
+                    self.store.set_read(item.item_id, True)
                 item.read = True
             if (self.current_scope == "home:all" and item.network == "mastodon"
                     and self.a11y.account_options.get(item.account_id, {}).get("sync_home_position")
@@ -1217,6 +1258,24 @@ class SocialFrame(TimelineViews, wx.Frame):
             event.Skip()
 
     def _show_details(self, item) -> None:
+        if self._is_notification_row(item):
+            data = self.store.get_document(notification_svc.ITEM_KIND, item.item_id)
+            note = notification_svc.NotificationItem.from_dict(data) if data else None
+            if note:
+                lines = [
+                    f"Notification: {note.category.replace('_', ' ')}",
+                    f"From: {note.actor_display} {note.actor_handle}".rstrip(),
+                    f"Network: {note.network}",
+                    f"When: {format_timestamp(note.created, self.a11y.display_timezone, twelve_hour=self.a11y.post_timestamps_12_hour)}",
+                    "",
+                    notification_svc.summary(note),
+                ]
+                if note.subject_uri:
+                    lines.extend(("", f"Post: {note.subject_uri}"))
+                text = "\n".join(lines)
+                if self.details.GetValue() != text:
+                    self.details.SetValue(text)
+                return
         accounts = {a.account_id: a for a in self.store.list_accounts()}
         acct = accounts.get(item.account_id)
         lines = [
@@ -1232,6 +1291,8 @@ class SocialFrame(TimelineViews, wx.Frame):
             lines.append(f"Boosted by {item.reblog_by}")
         if item.is_reply:
             lines.append("This is a reply.")
+        if item.is_quote:
+            lines.append("This post quotes another post.")
         lines.append("")
         lines.append(item.text)
         if item.media:
@@ -1367,6 +1428,11 @@ class SocialFrame(TimelineViews, wx.Frame):
         if item is None:
             self.announcer.error("Select a post to reply to.")
             return
+        if self._is_notification_row(item):
+            item = self._notification_subject(item)
+            if item is None:
+                self.announcer.error("This notification does not contain a post to reply to.")
+                return
         if item.remote_id.startswith(("instance:", "search:")):
             self.announcer.error("This search result is read-only."
                                  if item.remote_id.startswith("search:")
@@ -1375,27 +1441,50 @@ class SocialFrame(TimelineViews, wx.Frame):
         if item.visibility == "direct":
             self.cmd_direct_message(item)
             return
-        self._open_composer(reply_to=item)
+        self._open_composer(reply_to=item, target_account_id=item.account_id)
 
     def cmd_quote(self) -> None:
         item = self._current_item()
         if item is None:
             self.announcer.error("Select a post to quote.")
             return
+        if self._is_notification_row(item):
+            item = self._notification_subject(item)
+            if item is None:
+                self.announcer.error("This notification does not contain a post to quote.")
+                return
         if item.visibility == "direct" or item.remote_id.startswith(("instance:", "chat:", "search:")):
             self.announcer.error("This post cannot be quoted.")
             return
-        self._open_composer(quote_of=item.remote_id)
+        account = self.store.get_account(item.account_id)
+        caps = self.caps.get(item.account_id, item.network)
+        if account and account.network == "mastodon" and not caps.supports_quote:
+            if not item.uri:
+                self.announcer.error("This server does not support native quotes and the post has no link.")
+                return
+            self._open_composer(
+                initial_text=f"RE: {item.uri} ", quote_mode=True,
+                target_account_id=item.account_id)
+            return
+        self._open_composer(
+            quote_of=item.remote_id, quote_mode=True,
+            target_account_id=item.account_id)
 
-    def _open_composer(self, *, reply_to=None, quote_of: str = "") -> None:
+    def _open_composer(
+        self, *, reply_to=None, quote_of: str = "", initial_text: str = "",
+        quote_mode: bool = False, target_account_id: str | None = None,
+    ) -> None:
         accounts = self.store.list_accounts(include_paused=False)
+        if target_account_id:
+            accounts = [account for account in accounts if account.account_id == target_account_id]
         if not accounts:
             self.announcer.error("Add an account first.")
             return
         caps = {a.account_id: self.caps.get(a.account_id, a.network) for a in accounts}
         dlg = ComposerDialog(self, accounts, caps, store=self.store,
                              reply_to=reply_to, quote_of=quote_of,
-                             selected_account_id=self.selected_account_id)
+                             initial_text=initial_text, quote_mode=quote_mode,
+                             selected_account_id=target_account_id or self.selected_account_id)
         self.announcer.say("Composer open. Editor has focus.", "normal")
         if dlg.ShowModal() == wx.ID_OK and dlg.result_draft:
             self._handle_compose_result(
@@ -1458,6 +1547,7 @@ class SocialFrame(TimelineViews, wx.Frame):
                             adapter, split.texts(), run_id=draft.draft_id,
                             visibility=draft.visibility, content_warning=draft.content_warning,
                             lang=draft.lang, reply_to=draft.in_reply_to,
+                            quote_of=draft.quote_of,
                             on_progress=lambda index, total, remote, label=acct.label:
                                 self.announcer.say(f"{label}: Thread part {index} of {total} sent.", "action"))
                         message = f"Thread sent. {res.total} parts." if res.ok else res.summary()
@@ -1494,6 +1584,11 @@ class SocialFrame(TimelineViews, wx.Frame):
         if item is None:
             self.announcer.error("Select a post first.")
             return
+        if self._is_notification_row(item):
+            item = self._notification_subject(item)
+            if item is None:
+                self.announcer.error("This notification does not contain a post for that action.")
+                return
         if item.remote_id.startswith("search:") or (column != "flagged" and (
                 item.remote_id.startswith(("instance:", "chat:"))
                 or (column == "reblogged" and item.visibility == "direct"))):
@@ -1575,7 +1670,10 @@ class SocialFrame(TimelineViews, wx.Frame):
         item = self._current_item()
         if item is None:
             return
-        self.store.set_read(item.item_id, True)
+        if self._is_notification_row(item):
+            notification_svc.mark_read(self.store, item.item_id)
+        else:
+            self.store.set_read(item.item_id, True)
         item.read = True
         self.announcer.say("Marked read.", "normal")
 
@@ -1584,6 +1682,11 @@ class SocialFrame(TimelineViews, wx.Frame):
         if item is None:
             self.announcer.error("Select a post first.")
             return
+        if self._is_notification_row(item):
+            item = self._notification_subject(item)
+            if item is None:
+                self.announcer.error("This notification does not contain a conversation.")
+                return
         if item.remote_id.startswith(("instance:", "search:")):
             self.announcer.error("This result does not have a conversation."
                                  if item.remote_id.startswith("search:")
@@ -1601,8 +1704,10 @@ class SocialFrame(TimelineViews, wx.Frame):
         item = self._current_item()
         if item is None:
             return
+        if self._is_notification_row(item):
+            item = self._notification_subject(item) or item
         import re
-        urls = re.findall(r"https?://\S+", item.text)
+        urls = re.findall(r"https?://\S+", " ".join((item.text, item.uri)))
         if not urls:
             self.announcer.say("No links in this post.", "normal")
             return
@@ -1698,6 +1803,8 @@ class SocialFrame(TimelineViews, wx.Frame):
     def cmd_play_media(self) -> None:
         """Play the focused post's media in the accessible player (PRD 19)."""
         item = self._current_item()
+        if self._is_notification_row(item):
+            item = self._notification_subject(item)
         if item is None or not item.media:
             self.announcer.say("This post has no media to play.", "normal")
             return
@@ -1709,12 +1816,17 @@ class SocialFrame(TimelineViews, wx.Frame):
             return
         accounts = self.store.list_accounts(include_paused=False)
         caps = {a.account_id: self.caps.get(a.account_id, a.network) for a in accounts}
-        dlg = ComposerDialog(self, accounts, caps, store=self.store)
+        dlg = ComposerDialog(
+            self, accounts, caps, store=self.store,
+            quote_of=draft.quote_of, initial_text=draft.text,
+            quote_mode=bool(draft.quote_of),
+            selected_account_id=draft.targets[0] if draft.targets else None)
         try:
-            dlg.editor.SetValue(draft.text)
             if draft.content_warning:
                 dlg.cw.SetValue(draft.content_warning)
             dlg.thread_mode.SetValue(draft.thread_mode)
+            for index, account in enumerate(accounts):
+                dlg.accounts_box.Check(index, account.account_id in draft.targets)
             dlg._refresh_report()
         except Exception:
             pass

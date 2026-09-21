@@ -71,6 +71,7 @@ def publish_thread(
     content_warning: str = "",
     lang: str = "",
     reply_to: str = "",
+    quote_of: str = "",
     start_index: int = 1,
     parent_remote_id: str = "",
     on_progress: ProgressFn | None = None,
@@ -95,6 +96,7 @@ def publish_thread(
             content_warning=content_warning if i == 1 else "",
             lang=lang,
             in_reply_to=parent,
+            quote_of=quote_of if i == 1 else "",
             idempotency_key=f"{run_id}:{i}",
         )
         try:

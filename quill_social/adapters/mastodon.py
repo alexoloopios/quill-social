@@ -54,6 +54,11 @@ _NOT_WIRED = (
 # -- pure mapping helpers -----------------------------------------------------
 
 _TAG_RE = re.compile(r"<[^>]+>")
+_QUOTE_INLINE_RE = re.compile(
+    r"<p\b[^>]*\bclass\s*=\s*(?:\"[^\"]*\bquote-inline\b[^\"]*\"|"
+    r"'[^']*\bquote-inline\b[^']*')[^>]*>.*?</p\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def _to_ms(value: Any) -> int:
@@ -87,6 +92,18 @@ def _html_to_text(html: str) -> str:
     text = re.sub(r"(?i)</p\s*>", "\n\n", text)
     text = _TAG_RE.sub("", text)
     return unescape(text).strip()
+
+
+def _status_text(status: dict) -> str:
+    """Flatten status content, hiding Mastodon's native-quote compatibility link."""
+    content = status.get("content", "") or ""
+    has_structured_quote = (
+        isinstance(status.get("quote"), dict)
+        or isinstance(status.get("quoted_status"), dict)
+    )
+    if has_structured_quote:
+        content = _QUOTE_INLINE_RE.sub("", content)
+    return _html_to_text(content)
 
 
 def _acct_handle(account: dict) -> str:
@@ -150,7 +167,7 @@ def _status_to_item(status: dict, *, account_id: str = "") -> SocialItem:
         author_handle=_acct_handle(account),
         author_display=account.get("display_name", "") or "",
         author_id=str(account.get("id", "") or ""),
-        text=_html_to_text(inner.get("content", "") or ""),
+        text=_status_text(inner),
         lang=inner.get("language", "") or "",
         created_at=_to_ms(inner.get("created_at")),
         visibility=inner.get("visibility", "public") or "public",
@@ -169,6 +186,43 @@ def _status_to_item(status: dict, *, account_id: str = "") -> SocialItem:
     if isinstance(boost, dict):
         item.reblog_of = str(inner.get("id", "") or "")
         item.reblog_by = _acct_handle(status.get("account", {}) or {})
+    quote = inner.get("quote") if isinstance(inner, dict) else None
+    quoted = quote.get("quoted_status") if isinstance(quote, dict) else None
+    quote_state = str(quote.get("state") or "") if isinstance(quote, dict) else ""
+    if not isinstance(quoted, dict):
+        legacy = inner.get("quoted_status") if isinstance(inner, dict) else None
+        quoted = legacy if isinstance(legacy, dict) else None
+    if isinstance(quoted, dict) and quote_state in {"", "accepted"}:
+        item.quote_of = str(quoted.get("id") or "")
+        quoted_account = quoted.get("account") or {}
+        quoted_author = (quoted_account.get("display_name")
+                         or _acct_handle(quoted_account) or "Unknown author")
+        quoted_text = _html_to_text(quoted.get("content", "") or "")
+        quoted_warning = quoted.get("spoiler_text", "") or ""
+        parts = [f"Quoted post by {quoted_author}:"]
+        if quoted_warning:
+            parts.append(f"Content warning: {quoted_warning}")
+        parts.append(quoted_text or "(no text)")
+        for media in _media_to_model(quoted.get("media_attachments")):
+            parts.append(f"Media ({media.kind}): {media.alt_text or '(no alt text)'}")
+        item.text = "\n\n".join(filter(None, (item.text, "\n".join(parts))))
+    elif isinstance(quote, dict):
+        item.quote_of = str(
+            quote.get("quoted_status_id")
+            or (quoted.get("id") if isinstance(quoted, dict) else "")
+            or quote.get("id") or f"quote:{quote_state or 'unavailable'}")
+        state = quote_state.replace("_", " ") or "unavailable"
+        wording = {
+            "pending": "Quoted post pending approval.",
+            "rejected": "Quoted post was rejected.",
+            "revoked": "Quoted post permission was revoked.",
+            "deleted": "Quoted post was deleted.",
+            "unauthorized": "Quoted post is not available to this account.",
+            "blocked account": "Quoted post hidden because you blocked its author.",
+            "blocked domain": "Quoted post hidden because you blocked its domain.",
+            "muted account": "Quoted post hidden because you muted its author.",
+        }.get(state, "Quoted post unavailable.")
+        item.text = "\n\n".join(filter(None, (item.text, wording)))
     return item
 
 
@@ -207,6 +261,33 @@ def _mastodon_error(exc: Exception) -> AdapterError:
     if "NotFound" in name or "BadRequest" in name or status in (400, 404, 422):
         return AdapterError(msg, kind="validation")
     return AdapterError(msg, kind="unknown")
+
+
+def _notification_detail(note: dict) -> str:
+    """Extract readable context from Mastodon notifications without a status."""
+    kind = note.get("type") or ""
+    if kind == "moderation_warning":
+        warning = note.get("moderation_warning") or {}
+        return str(warning.get("text") or warning.get("action") or "")
+    if kind == "severed_relationships":
+        event = note.get("event") or {}
+        target = event.get("target_name") or event.get("type") or ""
+        followers = int(event.get("followers_count", 0) or 0)
+        following = int(event.get("following_count", 0) or 0)
+        counts = []
+        if followers:
+            counts.append(f"{followers} follower relationship{'s' if followers != 1 else ''}")
+        if following:
+            counts.append(f"{following} following relationship{'s' if following != 1 else ''}")
+        return ", ".join(filter(None, (str(target), *counts)))
+    if kind == "admin.report":
+        report = note.get("report") or {}
+        return str(report.get("comment") or "")
+    if kind in {"added_to_collection", "collection_update"}:
+        collection = note.get("collection") or {}
+        return str(collection.get("name") or collection.get("title") or "")
+    fallback = note.get("fallback") or {}
+    return str(fallback.get("body") or fallback.get("title") or "")
 
 
 # -- adapter ------------------------------------------------------------------
@@ -255,8 +336,32 @@ class MastodonAdapter(NetworkAdapter):
             overrides["max_alt_text"] = int(media["description_limit"])
         if "version" in instance_meta:
             overrides["server_version"] = str(instance_meta["version"])
+        api_version = ((instance_meta or {}).get("api_versions", {}) or {}).get("mastodon")
+        if api_version is not None:
+            try:
+                overrides["supports_quote"] = int(api_version) >= 7
+            except (TypeError, ValueError):
+                pass
+        elif "version" in instance_meta:
+            try:
+                major, minor = (int(part) for part in str(instance_meta["version"]).split(".")[:2])
+                overrides["supports_quote"] = (major, minor) >= (4, 5)
+            except (TypeError, ValueError):
+                pass
         self._caps = self._caps.merge(**overrides)
         return self._caps
+
+    def probe_capabilities(self) -> Capabilities:
+        """Fetch current instance metadata and refine per-account capabilities."""
+        client = self._require_client()
+        try:
+            if hasattr(client, "instance_v2"):
+                meta = client.instance_v2()
+            else:
+                meta = client.instance()
+        except Exception as exc:  # noqa: BLE001
+            raise _mastodon_error(exc) from exc
+        return self.refine_from_instance(meta or {})
 
     # -- live methods (require an injected/built client) ----------------------
 
@@ -446,6 +551,7 @@ class MastodonAdapter(NetworkAdapter):
                 actor_name=actor.get("display_name") or "",
                 actor_handle=_acct_handle(actor), account_id=self._account_id,
                 created_at=_to_ms(note.get("created_at")),
+                text=_notification_detail(note),
                 item=(_status_to_item(status, account_id=self._account_id)
                       if isinstance(status, dict) else None),
             ))
@@ -471,13 +577,15 @@ class MastodonAdapter(NetworkAdapter):
     def publish(self, request: PublishRequest) -> PublishResult:
         client = self._require_client()
         try:
-            status = client.status_post(
-                request.text,
-                visibility=request.visibility or None,
-                spoiler_text=request.content_warning or None,
-                language=request.lang or None,
-                in_reply_to_id=request.in_reply_to or None,
-            )
+            kwargs = {
+                "visibility": request.visibility or None,
+                "spoiler_text": request.content_warning or None,
+                "language": request.lang or None,
+                "in_reply_to_id": request.in_reply_to or None,
+            }
+            if request.quote_of:
+                kwargs["quoted_status_id"] = request.quote_of
+            status = client.status_post(request.text, **kwargs)
         except Exception as exc:  # noqa: BLE001
             raise _mastodon_error(exc) from exc
         item = _status_to_item(status, account_id=self._account_id)

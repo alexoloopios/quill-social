@@ -1,6 +1,7 @@
 import pytest
 
 from quill_social.model import Account, SocialItem
+from quill_social.services.notifications import NotificationItem, save_items
 from quill_social.services.refresh import RefreshResult
 
 wx = pytest.importorskip("wx")
@@ -106,6 +107,57 @@ def test_private_and_remote_rows_cannot_use_public_actions(frame, monkeypatch, r
     assert not frame._pending_reactions
     assert len(private) == (1 if visibility == "direct" else 0)
     assert errors
+
+
+def test_notifications_are_event_rows_and_keep_statusless_follows(frame):
+    account = frame.store.list_accounts()[0]
+    frame.selected_account_id = account.account_id
+    subject = frame.store.upsert_item(post(account, "post", uri="https://example/post"))
+    save_items(frame.store, [
+        NotificationItem(notif_id="fav", category="favourite", account_id=account.account_id,
+                         network=account.network, actor_display="Ada", subject_id="post",
+                         text="Original", created=3),
+        NotificationItem(notif_id="boost", category="repost", account_id=account.account_id,
+                         network=account.network, actor_display="Ben", subject_id="post",
+                         text="Original", created=2),
+        NotificationItem(notif_id="follow", category="follow", account_id=account.account_id,
+                         network=account.network, actor_display="Cat", created=1),
+        NotificationItem(notif_id="mention", category="mention", account_id=account.account_id,
+                         network=account.network, actor_display="Dan", created=4),
+    ])
+    rows = frame._scope_items("attention:notifications")
+    assert [row.text for row in rows] == [
+        "Ada favourited your post: Original",
+        "Ben reposted your post: Original",
+        "Cat followed you",
+    ]
+    assert len({row.item_id for row in rows}) == 3
+    assert frame._notification_subject(rows[0]).item_id == subject.item_id
+
+
+def test_mastodon_quote_uses_native_support_or_link_fallback(frame, monkeypatch):
+    account = frame.store.put_account(Account(
+        account_id="mastodon-quote", network="mastodon", handle="reader",
+        instance="example.social"))
+    item = post(account, "42", uri="https://example.social/@ada/42")
+    monkeypatch.setattr(frame, "_current_item", lambda: item)
+    opened = []
+    monkeypatch.setattr(frame, "_open_composer", lambda **kwargs: opened.append(kwargs))
+
+    frame.caps.seed_from_network(account.account_id, "mastodon")
+    frame.cmd_quote()
+    assert opened[-1] == {
+        "initial_text": "RE: https://example.social/@ada/42 ",
+        "quote_mode": True,
+        "target_account_id": account.account_id,
+    }
+
+    frame.caps.refine(account.account_id, supports_quote=True)
+    frame.cmd_quote()
+    assert opened[-1] == {
+        "quote_of": "42", "quote_mode": True,
+        "target_account_id": account.account_id,
+    }
 
 
 def test_standard_search_creates_closeable_server_timeline(frame, monkeypatch):

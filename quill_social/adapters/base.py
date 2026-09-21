@@ -56,6 +56,7 @@ class NotificationEvent:
     account_id: str = ""
     actor_handle: str = ""
     created_at: int = 0
+    text: str = ""
 
 
 @dataclass

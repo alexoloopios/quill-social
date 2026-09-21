@@ -224,7 +224,7 @@ def render_row(
     terse and fast to hear.
     """
     s = settings or A11ySettings()
-    pieces: list[str] = []
+    pieces: list[tuple[str, str]] = []
     for fid in _ordered_fields(profile, item, s):
         if fid == "network" and not s.speak_network_prefix:
             continue
@@ -232,8 +232,20 @@ def render_row(
             continue
         val = field_value(item, fid, account=account, settings=s, now=now)
         if val:
-            pieces.append(val)
-    return ". ".join(pieces)
+            pieces.append((fid, val))
+    if not pieces:
+        return ""
+    rendered = pieces[0][1]
+    for index in range(1, len(pieces)):
+        previous_field = pieces[index - 1][0]
+        field_id, value = pieces[index]
+        # Match the recovered client's "Author: post" timeline format. A
+        # colon creates a reliable speech boundary when the body begins with
+        # an @mention; a period before @ is often run together by NVDA.
+        separator = (": " if previous_field == "author"
+                     and field_id in {"text", "content_warning"} else ". ")
+        rendered += separator + value
+    return rendered
 
 
 def _ordered_fields(profile, item, settings):

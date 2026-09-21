@@ -88,11 +88,13 @@ class ComposerDialog(wx.Dialog):
         store=None,
         reply_to=None,
         quote_of: str = "",
+        initial_text: str = "",
+        quote_mode: bool = False,
         now_ms: int | None = None,
         selected_account_id: str | None = None,
         ui_mode: str | None = None,
     ):
-        title = "Reply" if reply_to else "Compose"
+        title = "Reply" if reply_to else ("Quote" if quote_of or quote_mode else "Compose")
         super().__init__(parent, title=title,
                          style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
         mode = ui_mode or getattr(getattr(parent, "a11y", None), "ui_mode", "standard")
@@ -107,6 +109,7 @@ class ComposerDialog(wx.Dialog):
         self._store = store
         self._reply_to = reply_to
         self._quote_of = quote_of
+        self._initial_text = initial_text
         self._now = model.now_ms() if now_ms is None else int(now_ms)
 
         self.result_action: str = ""
@@ -220,6 +223,9 @@ class ComposerDialog(wx.Dialog):
         self._sync_media_list()
         self._sync_poll_options()
         self._sync_poll_enabled()
+        if self._initial_text:
+            self.editor.SetValue(self._initial_text)
+            self.editor.SetInsertionPointEnd()
         self.editor.SetFocus()
         self._refresh_report()
 
@@ -593,6 +599,15 @@ class ComposerDialog(wx.Dialog):
         if not draft.text.strip() and not draft.media:
             wx.MessageBox("Write something first.", "Composer",
                           wx.OK | wx.ICON_INFORMATION, self)
+            return
+        report = composer_svc.analyze_draft(
+            draft, {account.account_id: account for account in self._accounts}, self._caps)
+        errors = [f"{row.account_label}: {error}"
+                  for row in report.per_network for error in row.errors]
+        if errors and action != "save":
+            wx.MessageBox(
+                "This post cannot be published yet:\n\n" + "\n".join(errors),
+                "Composer", wx.OK | wx.ICON_INFORMATION, self)
             return
         schedule_at: int | None = None
         if action == "schedule":
