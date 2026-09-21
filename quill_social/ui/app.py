@@ -799,7 +799,7 @@ class SocialFrame(TimelineViews, wx.Frame):
         index = self.accounts.GetSelection()
         if index == wx.NOT_FOUND:
             return
-        self._select_account(self._account_ids[index], announce=False)
+        self._select_account(self._account_ids[index])
 
     def _select_account(self, account_id: str | None, *, announce: bool = True) -> None:
         self.selected_account_id = account_id
@@ -1083,10 +1083,10 @@ class SocialFrame(TimelineViews, wx.Frame):
         if not keep_selection:
             self.details.Clear()
         if scope.startswith("pub:"):
-            self._load_publishing(scope, label)
+            self._load_publishing(scope, label, announce=announce)
             return
         if scope.startswith("gh:"):
-            self._load_github(scope, label)
+            self._load_github(scope, label, announce=announce)
             return
         self._ensure_extra_loaded(scope)
         self._items = self._scope_items(scope)
@@ -1097,11 +1097,15 @@ class SocialFrame(TimelineViews, wx.Frame):
         if previous_id and selected and selected.item_id == previous_id:
             self._field_index = field_index
         unread = sum(1 for it in self._items if not it.read)
-        if announce:
+        if self._announce_navigation_summary(announce):
             self.announcer.say(f"{label}. {len(self._items)} items, {unread} unread.",
                                "normal")
 
-    def _load_publishing(self, scope: str, label: str) -> None:
+    def _announce_navigation_summary(self, requested: bool) -> bool:
+        return bool(requested and self.a11y.ui_mode == "advanced"
+                    and self.a11y.announce_timeline_summary)
+
+    def _load_publishing(self, scope: str, label: str, *, announce: bool = True) -> None:
         self.list.DeleteAllItems()
         self._items = []
         if scope == "pub:drafts":
@@ -1111,7 +1115,8 @@ class SocialFrame(TimelineViews, wx.Frame):
             for i, d in enumerate(drafts):
                 preview = (d.text[:80] or "(empty)").replace("\n", " ")
                 self.list.InsertItem(i, f"Draft: {preview}")
-            self.announcer.say(f"{label}. {len(drafts)} drafts.", "normal")
+            if self._announce_navigation_summary(announce):
+                self.announcer.say(f"{label}. {len(drafts)} drafts.", "normal")
             self._draft_rows = drafts
             return
         state = scope.split(":", 1)[1]
@@ -1122,9 +1127,10 @@ class SocialFrame(TimelineViews, wx.Frame):
             when = format_timestamp(p.scheduled_for, self.a11y.display_timezone) if p.scheduled_for else "now"
             self.list.InsertItem(
                 i, f"{p.network} -> {p.state}, {when}, retries {p.retry_count}")
-        self.announcer.say(f"{label}. {len(plans)} items.", "normal")
+        if self._announce_navigation_summary(announce):
+            self.announcer.say(f"{label}. {len(plans)} items.", "normal")
 
-    def _load_github(self, scope: str, label: str) -> None:
+    def _load_github(self, scope: str, label: str, *, announce: bool = True) -> None:
         """Render GitHub items as text rows (PRD 24.1).
 
         Backed by the deterministic MockGitHub so the collaboration surface is
@@ -1159,7 +1165,8 @@ class SocialFrame(TimelineViews, wx.Frame):
             tail = f" [{state}]" if state else ""
             row = f"{head}{title}{tail}{(' ' + labels) if labels else ''}".strip()
             self.list.InsertItem(i, row)
-        self.announcer.say(f"{label}. {len(objs)} items.", "normal")
+        if self._announce_navigation_summary(announce):
+            self.announcer.say(f"{label}. {len(objs)} items.", "normal")
 
     def _render_list(self, *, keep_selection: bool = False, selected_item_id: str | None = None) -> None:
         previous = self._current_item() if keep_selection else None

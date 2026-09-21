@@ -341,6 +341,43 @@ def test_account_navigation_never_transfers_keyboard_focus(app, monkeypatch, mod
         frame._on_close(None)
 
 
+def test_navigation_summaries_are_advanced_and_optional(app, monkeypatch):
+    from quill_social.model import Account
+    from quill_social.ui.app import SocialFrame
+
+    frame = SocialFrame()
+    try:
+        frame.store.put_account(Account(account_id="second", network="mock", handle="@second"))
+        frame._populate_accounts()
+        spoken = []
+        monkeypatch.setattr(frame.announcer, "say", lambda text, *a, **k: spoken.append(text))
+        frame.a11y.announce_timeline_summary = True
+
+        bookmarks = frame._timeline_scopes.index("library:bookmarks")
+        frame.timelines.SetSelection(bookmarks)
+        frame.timelines.ProcessWindowEvent(
+            wx.CommandEvent(wx.EVT_LISTBOX.typeId, frame.timelines.GetId()))
+        assert spoken == []
+
+        frame.set_ui_mode("advanced")
+        spoken.clear()
+        frame.nav.SelectItem(frame._nav_nodes["home:unread"])
+        assert len(spoken) == 1
+        assert spoken[0].startswith("Unread. ") and spoken[0].endswith(" unread.")
+        spoken.clear()
+        frame.accounts.SetSelection(2)
+        frame.accounts.ProcessWindowEvent(
+            wx.CommandEvent(wx.EVT_LISTBOX.typeId, frame.accounts.GetId()))
+        assert spoken == ["Home. 0 items, 0 unread."]
+
+        frame.a11y.announce_timeline_summary = False
+        spoken.clear()
+        frame.nav.SelectItem(frame._nav_nodes["library:bookmarks"])
+        assert spoken == []
+    finally:
+        frame._on_close(None)
+
+
 def test_display_timezone_preference_applies_immediately_and_cancel_keeps_value(app, monkeypatch):
     from quill_social import a11y
     from quill_social.time_display import format_timestamp

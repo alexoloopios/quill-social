@@ -11,6 +11,7 @@ def test_defaults():
     assert s.text_scale == 1.0
     assert s.speak_network_prefix is True
     assert s.speak_engagement is False
+    assert s.announce_timeline_summary is False
 
 
 def test_text_scale_steps():
@@ -21,13 +22,14 @@ def test_text_scale_steps():
 
 def test_persistence_roundtrip(tmp_path):
     s = A11ySettings(verbosity="verbose", high_contrast=True, scale_index=4,
-                     speak_engagement=True)
+                     speak_engagement=True, announce_timeline_summary=True)
     a11y.save(tmp_path, s)
     loaded = a11y.load(tmp_path)
     assert loaded.verbosity == "verbose"
     assert loaded.high_contrast is True
     assert loaded.scale_index == 4
     assert loaded.speak_engagement is True
+    assert loaded.announce_timeline_summary is True
 
 
 def test_from_dict_sanitizes():

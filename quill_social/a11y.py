@@ -38,6 +38,7 @@ class A11ySettings:
     speak_network_prefix: bool = True
     speak_engagement: bool = False
     announce_read_state: bool = True
+    announce_timeline_summary: bool = False
     display_timezone: Literal["system", "utc"] = "system"
     ui_mode: Literal["standard", "advanced"] = "standard"
     reverse_timelines: bool = False
@@ -89,6 +90,7 @@ class A11ySettings:
             speak_network_prefix=bool(d.get("speak_network_prefix", True)),
             speak_engagement=bool(d.get("speak_engagement", False)),
             announce_read_state=bool(d.get("announce_read_state", True)),
+            announce_timeline_summary=d.get("announce_timeline_summary") is True,
             reverse_timelines=d.get("reverse_timelines") is True,
             condense_mentions=d.get("condense_mentions") is True,
             exclude_web_addresses=d.get("exclude_web_addresses") is True,

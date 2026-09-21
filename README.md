@@ -148,8 +148,11 @@ controls into the fork:
   run in the background, and do not move focus away from the control in use.
 - **Behavior and cache:** open single links directly or use a chooser; optionally
   strip emojis/non-ASCII characters from reading rows; shorten automatic
-  notification announcements to one sentence; restore the last account/timeline/post at
-  startup; minimize to the system tray; and set server-fetch/display limits.
+  notification announcements to one sentence; optionally announce item and
+  unread counts while navigating accounts and timelines in Advanced mode;
+  restore the last account/timeline/post at startup; minimize to the system
+  tray; and set server-fetch/display limits. Standard mode leaves those counts
+  silent so the native account and timeline labels can be read uninterrupted.
   Cache clearing retains saved, flagged, favourited and annotated posts, drafts,
   and scheduled work. Multiple links always use a chooser.
 - **Shortcuts:** assign, clear and reset local shortcuts, plus optional global
