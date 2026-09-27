@@ -122,3 +122,22 @@ def test_poll_only_runs_for_enabled_accounts_and_never_overlaps(frame, monkeypat
     frame._refresh_running = True
     frame._poll_announcements()
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("account_specific", [False, True])
+def test_saved_quiet_hours_suppress_notification_speech(frame, monkeypatch, account_specific):
+    from datetime import datetime
+
+    from quill_social.ui.manage import save_quiet_hours
+    item = frame._current_item()
+    frame.a11y.account_options[item.account_id] = {"speech_timelines": ["attention:notifications"]}
+    frame._announcement_ready.add(item.account_id)
+    current = datetime.now()
+    minute = current.hour * 60 + current.minute
+    save_quiet_hours(frame.store, item.account_id if account_specific else "", minute, (minute+2)%1440)
+    spoken = []
+    monkeypatch.setattr(frame.announcer, "say", lambda *args, **kw: spoken.append(args))
+    result = RefreshResult(events=[NotificationEvent("quiet", "favourite", "Ada", item, item.account_id)])
+    frame._announce_updates(result, [], enabled=True)
+    assert not spoken
+    assert "quiet" in frame._seen_notification_ids[item.account_id]

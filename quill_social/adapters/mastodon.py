@@ -43,7 +43,7 @@ from quill_social.adapters.base import (
     PublishResult,
 )
 from quill_social.capabilities import Capabilities, default_for
-from quill_social.model import Media, Poll, PollOption, SocialItem
+from quill_social.model import Media, Poll, PollOption, SocialItem, now_ms
 
 _NOT_WIRED = (
     "The live Mastodon adapter is not enabled in this build. Install the "
@@ -577,14 +577,38 @@ class MastodonAdapter(NetworkAdapter):
     def publish(self, request: PublishRequest) -> PublishResult:
         client = self._require_client()
         try:
+            if request.quote_of and (request.media or request.poll):
+                raise AdapterError("Mastodon quotes cannot include media or a poll.", kind="validation")
+            if request.media and request.poll:
+                raise AdapterError("Choose media or a poll, not both.", kind="validation")
             kwargs = {
-                "visibility": request.visibility or None,
+                "visibility": "private" if request.visibility == "followers" else request.visibility or None,
                 "spoiler_text": request.content_warning or None,
                 "language": request.lang or None,
                 "in_reply_to_id": request.in_reply_to or None,
             }
             if request.quote_of:
                 kwargs["quoted_status_id"] = request.quote_of
+            if request.idempotency_key:
+                kwargs["idempotency_key"] = request.idempotency_key
+            if request.poll:
+                duration = (request.poll_expires_in if request.poll_expires_in is not None
+                            else ((request.poll.expires_at or 0) - now_ms()) // 1000)
+                if duration < 300 or len(request.poll.options) < 2:
+                    raise AdapterError("The poll needs two options and at least five minutes remaining.", kind="validation")
+                kwargs["poll"] = client.make_poll(
+                    [option.title for option in request.poll.options],
+                    expires_in=duration, multiple=request.poll.multiple)
+            if request.media:
+                uploads = []
+                for attachment in request.media:
+                    if not attachment.local_path:
+                        raise AdapterError("An attachment is missing its local file.", kind="validation")
+                    uploads.append(client.media_post(
+                        attachment.local_path, description=attachment.alt_text or None,
+                        synchronous=True))
+                kwargs["media_ids"] = [str(upload["id"]) for upload in uploads]
+                kwargs["sensitive"] = any(media.sensitive for media in request.media)
             status = client.status_post(request.text, **kwargs)
         except Exception as exc:  # noqa: BLE001
             raise _mastodon_error(exc) from exc

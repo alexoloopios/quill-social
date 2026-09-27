@@ -40,7 +40,7 @@ security = ["keyring>=25"]
 # (the mock adapter drives the P0 experience); installing them lights up real
 # Mastodon and Bluesky accounts.
 networks = [
-  "Mastodon.py>=1.8.1",
+  "Mastodon.py>=2.2.2",
   "atproto>=0.0.55",
 ]
 # Embedded media playback (PRD 19.2). Falls back to the OS default player

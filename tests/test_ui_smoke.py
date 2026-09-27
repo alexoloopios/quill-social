@@ -79,7 +79,7 @@ def test_restored_settings_are_applied_and_survive_close(app, monkeypatch, tmp_p
     assert a11y.load(data_dir).exclude_web_addresses
 
 
-def test_frame_builds_and_navigates(app):
+def test_frame_builds_and_navigates(app, monkeypatch):
     from quill_social.ui.app import SocialFrame
 
     frame = SocialFrame()
@@ -142,6 +142,11 @@ def test_frame_builds_and_navigates(app):
             draft_id=d.draft_id, account_id="acct_mock", network="mock",
             state="queued", scheduled_for=now_ms() - 1000))
         frame._on_sched_tick(None)
+        import time
+        deadline = time.monotonic() + 3
+        while frame._scheduler_running and time.monotonic() < deadline:
+            wx.Yield()
+            time.sleep(0.01)
         assert frame.store.list_plans(state="published")
     finally:
         frame._on_close(None)
@@ -499,12 +504,17 @@ def test_enter_views_post_but_respects_existing_remaps(app, monkeypatch):
 
 
 def test_restored_thread_draft_preserves_standard_mode_and_thread_summary(app, monkeypatch):
-    from quill_social.model import Draft
+    from quill_social.model import Draft, Media, Poll, PollOption, now_ms
     from quill_social.ui.app import ComposerDialog, SocialFrame
 
     frame = SocialFrame()
     try:
-        draft = frame.store.put_draft(Draft(text="A thread", targets=["acct_mock"], thread_mode=True))
+        draft = frame.store.put_draft(Draft(
+            text="A thread", targets=["acct_mock"], thread_mode=True,
+            in_reply_to="original", visibility="followers", content_warning="Spoilers",
+            media=[Media(local_path="photo.jpg", alt_text="A bird")],
+            poll=Poll(options=[PollOption(title="Yes"), PollOption(title="No")],
+                      multiple=True, expires_at=now_ms() + 86_400_000)))
         seen = []
         def inspect(dialog):
             assert dialog.ui_mode == "standard"
@@ -514,6 +524,13 @@ def test_restored_thread_draft_preserves_standard_mode_and_thread_summary(app, m
             dialog._on_more_options()
             assert dialog.thread_mode.IsShown()
             assert dialog.thread_mode.GetValue()
+            restored = dialog._build_draft()
+            assert restored.media == draft.media
+            assert restored.in_reply_to == draft.in_reply_to
+            assert restored.visibility == draft.visibility
+            assert restored.content_warning == draft.content_warning
+            assert [option.title for option in restored.poll.options] == ["Yes", "No"]
+            assert restored.poll.multiple
             seen.append(True)
             return wx.ID_CANCEL
         monkeypatch.setattr(ComposerDialog, "ShowModal", inspect)

@@ -17,7 +17,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 from quill_social.capabilities import Capabilities
-from quill_social.model import Media, SocialItem
+from quill_social.model import Media, Poll, SocialItem
 
 ERROR_KINDS = ("transient", "validation", "permission", "privacy", "unknown")
 
@@ -70,6 +70,8 @@ class PublishRequest:
     in_reply_to: str = ""  # remote id of the parent, for thread publishing
     quote_of: str = ""
     media: list[Media] = field(default_factory=list)
+    poll: Poll | None = None
+    poll_expires_in: int | None = None
     idempotency_key: str = ""  # dedupe a retried publish (PRD 40, partial threads)
 
 

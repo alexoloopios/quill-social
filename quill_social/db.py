@@ -436,8 +436,13 @@ class SocialStore:
         newest_first: bool = True,
         exclude_timeline_only: bool = False,
         exclude_direct: bool = False,
+        home_only: bool = False,
     ) -> list[SocialItem]:
         clauses: list[str] = []
+        if home_only:
+            clauses.append("(item_id IN (SELECT doc_id FROM documents WHERE kind='home-post') "
+                           "OR (network='mock' AND item_id NOT IN "
+                           "(SELECT doc_id FROM documents WHERE kind='timeline-only')))")
         if exclude_timeline_only:
             clauses.append("item_id NOT IN (SELECT doc_id FROM documents WHERE kind='timeline-only')")
         if exclude_direct:

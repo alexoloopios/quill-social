@@ -248,6 +248,7 @@ def classify(
     now: int | None = None,
     quiet_hours: tuple[int, int] | None = None,
     focus: FocusMode | None = None,
+    now_minute: int | None = None,
 ) -> NotificationDecision:
     """Decide how one notification reaches the user (PRD 25.2, 25.4)."""
     at = now if now is not None else now_ms()
@@ -267,7 +268,7 @@ def classify(
     window = quiet_hours
     if focus is not None and focus.active_at(at) and focus.quiet_hours is not None:
         window = focus.quiet_hours
-    quiet = in_quiet_hours(minute_of_day(at), window) and not critical
+    quiet = in_quiet_hours(minute_of_day(at) if now_minute is None else now_minute, window) and not critical
 
     decision = NotificationDecision(
         delivered=True,

@@ -19,6 +19,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from quill_social.adapters.base import AdapterError, NetworkAdapter, PublishRequest
+from quill_social.model import Media, Poll
 
 ProgressFn = Callable[[int, int, str], None]  # (index, total, published_remote_id)
 
@@ -72,6 +73,9 @@ def publish_thread(
     lang: str = "",
     reply_to: str = "",
     quote_of: str = "",
+    media: list[Media] | None = None,
+    poll: Poll | None = None,
+    poll_expires_in: int | None = None,
     start_index: int = 1,
     parent_remote_id: str = "",
     on_progress: ProgressFn | None = None,
@@ -97,6 +101,9 @@ def publish_thread(
             lang=lang,
             in_reply_to=parent,
             quote_of=quote_of if i == 1 else "",
+            media=list(media or []) if i == 1 else [],
+            poll=poll if i == 1 else None,
+            poll_expires_in=poll_expires_in if i == 1 else None,
             idempotency_key=f"{run_id}:{i}",
         )
         try:

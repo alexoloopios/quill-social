@@ -266,17 +266,43 @@ class SocialFrame(TimelineViews, wx.Frame):
 
     def _on_sched_tick(self, _e) -> None:
         """Publish any due local-tier plans (PRD 18.3, 18.12)."""
+        if self._closing or getattr(self, "_scheduler_running", False):
+            return
+        from quill_social.adapters.base import AdapterError
+        from quill_social.model import now_ms
+        from quill_social.services.scheduler import _failed_attempt, process_plan
+        at = now_ms()
+        deliveries = [(plan, self.store.get_draft(plan.draft_id),
+                       self.store.get_account(plan.account_id))
+                      for plan in self.store.due_plans(now=at)]
+        if not deliveries:
+            return
+        self._scheduler_running = True
+        credentials = self.credentials
+
+        def worker():
+            results = []
+            for plan, draft, account in deliveries:
+                try:
+                    if draft is None or account is None:
+                        raise AdapterError("Draft or account missing; cannot publish.", kind="validation")
+                    results.append(process_plan(plan, adapter_for(account, credentials), draft, now=at))
+                except Exception as exc:
+                    error = exc if isinstance(exc, AdapterError) else AdapterError(str(exc))
+                    results.append(_failed_attempt(plan, error, at))
+            wx.CallAfter(self._finish_scheduled, results)
+        Thread(target=worker, daemon=True, name="social-scheduler").start()
+
+    def _finish_scheduled(self, results):
+        self._scheduler_running = False
         if self._closing:
             return
-        try:
-            results = self.scheduler.run_due()
-        except Exception as exc:
-            self.announcer.error(f"Scheduled posting could not run: {exc}")
-            return
+        for result in results:
+            self.store.put_plan(result.plan)
         published = [r for r in results if r.published]
         if published:
             self._refresh_from_network(announce=False)
-            self._load_scope(self.current_scope, self.current_scope_label)
+            self._load_scope(self.current_scope, self.current_scope_label, keep_selection=True, announce=False)
         for result in results:
             account = self.store.get_account(result.plan.account_id)
             label = account.label if account else result.plan.account_id
@@ -924,7 +950,10 @@ class SocialFrame(TimelineViews, wx.Frame):
                 existing.add(key)
             stored = self.store.upsert_item(item)
             if key in result.home_keys:
+                self.store.put_document("home-post", stored.item_id, {})
                 self.store.delete_document("timeline-only", stored.item_id)
+            elif self.store.get_document("home-post", stored.item_id) is None:
+                self.store.put_document("timeline-only", stored.item_id, {"source": "notification"})
         notification_svc.save_items(self.store, getattr(result, "notifications", []))
         for account_id, caps in getattr(result, "capabilities", {}).items():
             self.caps.set(account_id, caps)
@@ -947,7 +976,10 @@ class SocialFrame(TimelineViews, wx.Frame):
                 existing.add(key)
             stored = self.store.upsert_item(item)
             if key in result.home_keys:
+                self.store.put_document("home-post", stored.item_id, {})
                 self.store.delete_document("timeline-only", stored.item_id)
+            elif self.store.get_document("home-post", stored.item_id) is None:
+                self.store.put_document("timeline-only", stored.item_id, {"source": "notification"})
         notification_svc.save_items(self.store, getattr(result, "notifications", []))
         for account_id, caps in getattr(result, "capabilities", {}).items():
             self.caps.set(account_id, caps)
@@ -987,12 +1019,21 @@ class SocialFrame(TimelineViews, wx.Frame):
                     or scope not in options.get("speech_timelines", [])):
                 return False
             if event is not None:
+                from datetime import datetime
+
+                from quill_social.ui.manage import load_quiet_hours
                 category = notification_svc.normalize_category(event.kind)
                 policy = notification_svc.get_policy(self.store, account_id, category)
-                if policy is not None:
-                    notification = notification_svc.from_event(event, account.network)
-                    if not notification_svc.classify(policy, notification).speak:
-                        return False
+                window = load_quiet_hours(self.store, account_id)
+                if None in window:
+                    window = load_quiet_hours(self.store, "")
+                window = None if None in window else window
+                notification = notification_svc.from_event(event, account.network)
+                local = datetime.now()
+                if not notification_svc.classify(
+                        policy or notification_svc.NotificationPolicy(), notification,
+                        quiet_hours=window, now_minute=local.hour * 60 + local.minute).speak:
+                    return False
             messages.append(automatic_text(item, self.a11y, scope=scope, notification=event,
                                           account_label=account.label, account_count=len(accounts),
                                           active_account_context=foreground and self.selected_account_id == account_id))
@@ -1049,12 +1090,12 @@ class SocialFrame(TimelineViews, wx.Frame):
                 if source not in {"home:all", "home:unread", "attention:mentions", "attention:notifications",
                                   "attention:flagged", "library:bookmarks", "library:favourites"}:
                     continue
-                for item in (items(exclude_timeline_only=True, exclude_direct=True) if source == "home:all" else self._scope_items(source, limit=limit)):
+                for item in (items(home_only=True, exclude_timeline_only=True, exclude_direct=True) if source == "home:all" else self._scope_items(source, limit=limit)):
                     merged[item.item_id] = item
             result = sorted(merged.values(), key=lambda item: item.created_at, reverse=True)
             return result if limit < 0 else result[:limit]
         if scope == "home:unread":
-            return items(unread_only=True, exclude_timeline_only=True, exclude_direct=True)
+            return items(unread_only=True, home_only=True, exclude_timeline_only=True, exclude_direct=True)
         if scope == "attention:mentions":
             return [it for it in items(exclude_direct=True) if self._mentions_account(it)]
         if scope == "attention:notifications":
@@ -1084,12 +1125,13 @@ class SocialFrame(TimelineViews, wx.Frame):
 
     def _catchup_items(self, *, limit: int | None = None) -> list:
         limit = self.a11y.timeline_display_limit if limit is None else limit
-        items = self.store.list_items(account_id=self.selected_account_id, limit=limit, exclude_timeline_only=True, exclude_direct=True)
+        items = self.store.list_items(account_id=self.selected_account_id, limit=limit, home_only=True, exclude_timeline_only=True, exclude_direct=True)
         items = catchup_svc.collapse_reposts(items)
         items = catchup_svc.collapse_cross_network(items)
         return items
 
     def _load_scope(self, scope: str, label: str, *, keep_selection: bool = False, announce: bool = True) -> None:
+        self._conversation_request = None
         previous = self._current_item() if keep_selection else None
         previous_id = previous.item_id if previous else None
         field_index = self._field_index
@@ -1521,6 +1563,7 @@ class SocialFrame(TimelineViews, wx.Frame):
         self._publish_now(draft)
 
     def _publish_now(self, draft) -> None:
+        self.store.put_draft(draft)
         if getattr(self, "_publishing", False):
             self.store.put_draft(draft)
             self.announcer.say("Another post is still sending. This post was saved as a draft.", "action")
@@ -1534,9 +1577,12 @@ class SocialFrame(TimelineViews, wx.Frame):
             targets.append((acct, self.caps.get(account_id, acct.network)))
         credentials = self.credentials
         self._publishing = True
+        poll_duration = ((draft.poll.expires_at - draft.created) // 1000
+                         if draft.poll and draft.poll.expires_at else None)
 
         def worker():
             results = []
+            successful_accounts = []
             for acct, caps in targets:
                 try:
                     adapter = adapter_for(acct, credentials)
@@ -1547,30 +1593,43 @@ class SocialFrame(TimelineViews, wx.Frame):
                             adapter, split.texts(), run_id=draft.draft_id,
                             visibility=draft.visibility, content_warning=draft.content_warning,
                             lang=draft.lang, reply_to=draft.in_reply_to,
-                            quote_of=draft.quote_of,
+                            quote_of=draft.quote_of, media=list(draft.media), poll=draft.poll,
+                            poll_expires_in=poll_duration,
                             on_progress=lambda index, total, remote, label=acct.label:
                                 self.announcer.say(f"{label}: Thread part {index} of {total} sent.", "action"))
                         message = f"Thread sent. {res.total} parts." if res.ok else res.summary()
                         if not res.ok:
                             message += " " + res.results[-1].error_message
                         results.append((acct.label, message, not res.ok))
+                        if res.ok:
+                            successful_accounts.append(acct.account_id)
                     else:
                         from quill_social.adapters.base import PublishRequest
                         adapter.publish(PublishRequest(
                             text=draft.text, visibility=draft.visibility,
                             content_warning=draft.content_warning, lang=draft.lang,
                             in_reply_to=draft.in_reply_to, quote_of=draft.quote_of,
+                            media=list(draft.media), poll=draft.poll,
+                            poll_expires_in=poll_duration,
                             idempotency_key=draft.draft_id))
                         results.append((acct.label, "Post sent.", False))
+                        successful_accounts.append(acct.account_id)
                 except Exception as exc:
                     results.append((acct.label, f"Post failed: {exc}", True))
-            wx.CallAfter(self._finish_publish, results)
+            wx.CallAfter(self._finish_publish, results, draft, successful_accounts)
         Thread(target=worker, daemon=True, name="social-publish").start()
 
-    def _finish_publish(self, results):
+    def _finish_publish(self, results, draft=None, successful_accounts=()):
         if self._closing:
             return
         self._publishing = False
+        if draft is not None:
+            if results and len(results) == len(draft.targets) and not any(row[2] for row in results):
+                self.store.delete_draft(draft.draft_id)
+            else:
+                draft.targets = [target for target in draft.targets if target not in successful_accounts]
+                self.store.put_draft(draft)
+                self.announcer.say("The composition is saved in Drafts. Check successful destinations before resending.", "action")
         self._refresh_from_network(announce=False)
         self._load_scope(self.current_scope, self.current_scope_label, keep_selection=True, announce=False)
         for label, status, failed in results:
@@ -1699,6 +1758,39 @@ class SocialFrame(TimelineViews, wx.Frame):
         self._items = sorted(thread, key=lambda x: x.created_at)
         self._render_list()
         self.announcer.say(f"Conversation. {len(self._items)} posts.", "normal")
+        account = self.store.get_account(item.account_id)
+        if account is None:
+            return
+        token = object()
+        self._conversation_request = token
+        scope, selected_account = self.current_scope, self.selected_account_id
+        credentials = self.credentials
+
+        def worker():
+            try:
+                posts = adapter_for(account, credentials).thread(item)
+                error = None
+            except Exception as exc:
+                posts, error = [], str(exc)
+            wx.CallAfter(self._finish_conversation, token, scope, selected_account, posts, error)
+        Thread(target=worker, daemon=True, name="social-conversation").start()
+
+    def _finish_conversation(self, token, scope, selected_account, posts, error):
+        if self._closing or token is not getattr(self, "_conversation_request", None):
+            return
+        if self.current_scope != scope or self.selected_account_id != selected_account:
+            return
+        if error:
+            self.announcer.error(f"Could not refresh conversation: {error}. Showing cached posts.")
+            return
+        for post in posts:
+            stored = self.store.upsert_item(post)
+            if self.store.get_document("home-post", stored.item_id) is None:
+                self.store.put_document("timeline-only", stored.item_id, {"source": "conversation"})
+        if posts:
+            self._items = sorted(posts, key=lambda post: post.created_at)
+            self._render_list()
+            self.announcer.say(f"Conversation. {len(posts)} posts.", "normal")
 
     def cmd_open_links(self) -> None:
         item = self._current_item()
@@ -1822,15 +1914,35 @@ class SocialFrame(TimelineViews, wx.Frame):
             quote_mode=bool(draft.quote_of),
             selected_account_id=draft.targets[0] if draft.targets else None)
         try:
+            from types import SimpleNamespace
+
+            from quill_social.ui.composer import _POLL_DURATIONS
+            dlg._reply_to = SimpleNamespace(remote_id=draft.in_reply_to) if draft.in_reply_to else None
+            dlg._media = list(draft.media)
+            dlg._sync_media_list()
+            dlg.visibility.SetStringSelection(draft.visibility)
+            if draft.poll:
+                dlg.poll_toggle.SetValue(True)
+                dlg._poll_options = [option.title for option in draft.poll.options]
+                dlg.poll_multiple.SetValue(draft.poll.multiple)
+                remaining = max(0, (draft.poll.expires_at or draft.created) - draft.created)
+                duration = min(range(len(_POLL_DURATIONS)),
+                               key=lambda index: abs(_POLL_DURATIONS[index][1] - remaining))
+                dlg.poll_duration.SetSelection(duration)
+                dlg._sync_poll_options()
+                dlg._sync_poll_enabled()
             if draft.content_warning:
                 dlg.cw.SetValue(draft.content_warning)
             dlg.thread_mode.SetValue(draft.thread_mode)
             for index, account in enumerate(accounts):
                 dlg.accounts_box.Check(index, account.account_id in draft.targets)
             dlg._refresh_report()
-        except Exception:
-            pass
+        except Exception as exc:
+            dlg.Destroy()
+            self.announcer.error(f"Could not restore this draft: {exc}. The saved draft is unchanged.")
+            return
         if dlg.ShowModal() == wx.ID_OK and dlg.result_draft:
+            dlg.result_draft.lang = draft.lang
             self.store.delete_draft(draft_id)
             self._handle_compose_result(
                 dlg.result_action, dlg.result_draft,

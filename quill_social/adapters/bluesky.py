@@ -516,7 +516,50 @@ class BlueskyAdapter(NetworkAdapter):
             raise AdapterError("Use the direct message dialog to send a private message.", kind="validation")
         client = self._require_client()
         try:
-            resp = client.send_post(text=request.text)
+            if request.poll:
+                raise AdapterError("Bluesky does not support polls.", kind="validation")
+            if request.visibility != "public":
+                raise AdapterError("Bluesky posts support public visibility only.", kind="privacy")
+            if any(media.kind != "image" or not media.local_path for media in request.media):
+                raise AdapterError("Bluesky publishing currently supports local image attachments only.", kind="validation")
+            kwargs = {}
+            if request.lang:
+                kwargs["langs"] = [request.lang]
+            if request.in_reply_to or request.quote_of or request.media:
+                from atproto import models
+
+                def reference(uri):
+                    response = client.get_posts([uri])
+                    post = next((_as_dict(post) for post in _attr(response, "posts", []) or []
+                                 if _attr(post, "uri") == uri), None)
+                    if not post or not post.get("cid"):
+                        raise AdapterError("The referenced post is unavailable.", kind="validation")
+                    return models.ComAtprotoRepoStrongRef.Main(uri=uri, cid=post["cid"]), post
+
+                if request.in_reply_to:
+                    parent, post = reference(request.in_reply_to)
+                    root_data = (post.get("record", {}).get("reply") or {}).get("root")
+                    root = models.ComAtprotoRepoStrongRef.Main(**root_data) if root_data else parent
+                    kwargs["reply_to"] = models.AppBskyFeedPost.ReplyRef(parent=parent, root=root)
+                quote = None
+                if request.quote_of:
+                    ref, _ = reference(request.quote_of)
+                    quote = models.AppBskyEmbedRecord.Main(record=ref)
+                images = None
+                if request.media:
+                    from pathlib import Path
+                    if len(request.media) > 4:
+                        raise AdapterError("Bluesky supports up to four images per post.", kind="validation")
+                    data = [Path(media.local_path).read_bytes() for media in request.media]
+                    images = models.AppBskyEmbedImages.Main(images=[
+                        models.AppBskyEmbedImages.Image(
+                            alt=media.alt_text, image=_attr(client.upload_blob(blob), "blob"))
+                        for media, blob in zip(request.media, data, strict=True)])
+                if quote and images:
+                    kwargs["embed"] = models.AppBskyEmbedRecordWithMedia.Main(record=quote, media=images)
+                elif quote or images:
+                    kwargs["embed"] = quote or images
+            resp = client.send_post(text=request.text, **kwargs)
         except Exception as exc:  # noqa: BLE001
             raise _bluesky_error(exc) from exc
         uri = _attr(resp, "uri", "") or ""

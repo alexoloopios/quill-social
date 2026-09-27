@@ -8,14 +8,14 @@ Tagline: *Every conversation within reach.*
 
 ## What this build is
 
-This repository implements the **full PRD roadmap** ([product requirements](docs/QUILL_Social_PRD_Working_Draft.md)) — every priority (P0–P2) and phase (0–8). See [docs/PHASES.md](docs/PHASES.md) for the phase→module map. It is a self-contained engine plus an accessible wxPython shell, following the same pattern as QuillBeacon and QUILL Audio Studio (a package that vendors its own dependency closure so it builds and runs from one repo). The production target moves the engine onto `quill.ui.app_shell.AppShellFrame` (PRD section 44).
+This contribution improves the working Mastodon and Bluesky reader and composer, with Standard and Advanced interfaces. It primarily covers PRD phases 1 (Reader) and 2 (Composer), plus parts of phase 3 (Organization) and phase 4 (Publishing Studio). See [docs/PHASES.md](docs/PHASES.md) for the implementation map and remaining boundaries. It does not claim completion of every P0–P2 release requirement.
 
-Everything runs against local storage and deterministic mock backends, so you can try the whole experience — timelines, threading, composing, splitting, scheduling, campaigns, moderation, analytics, AI, GitHub, media — with no account, no AI key, and no network. **363 tests pass, ruff-clean.**
+The app includes local storage and deterministic mock backends for trying features without credentials. Live Mastodon and Bluesky accounts use the network adapters. Later roadmap modules include prototypes and service interfaces; their presence is not a release-readiness claim. Sounds remain deferred.
 
 ### Implemented
 
-- **Accessible three-pane shell** — navigation tree, item list, details. Up/Down move between posts; Left/Right read the configured fields of the focused post; Enter opens details. Focus is never stolen by a refresh. Command center, Where Am I, context help, remappable keymap.
-- **Capability-driven architecture** — the UI adapts to what each account supports instead of assuming every network is the same. Mastodon, Bluesky, and GitHub ship as capability descriptors with a live-probe path; deterministic mock backends make everything runnable.
+- **Accessible Standard and Advanced interfaces** — account list, account-scoped navigation, post list, and details; Standard mode hides advanced publishing tools. Up/Down move between posts; Left/Right read the configured fields of the focused post; Enter opens details. Focus is never stolen by a refresh. Command center, Where Am I, context help, remappable keymap.
+- **Capability-driven architecture** — the UI adapts to what each account supports instead of assuming every network is the same. Mastodon, Bluesky, and GitHub have live adapters and capability descriptors; deterministic mock backends make everything runnable.
 - **Intelligent thread splitting** — paragraph/sentence/word boundaries, never breaks links/mentions/hashtags/Markdown/code, `1/n` numbering reserved out of the limit, Mastodon URL/mention weighting.
 - **Publishing studio** — scheduler + thread publisher state machines (pause-on-failure, repair/resume, idempotency, backoff), DST-correct queue schedules, accessible agenda/calendar with conflict detection, approvals with a role matrix and audit trail, recurring content with safeguards, CSV/TSV/JSON/Markdown bulk import, and optimal-time suggestions.
 - **Local-first SQLite** — WAL, FTS5 search, a generic document store, and re-fetch that preserves local read/flag/folder state. Pruning never touches drafts, notes, schedules, folders, or bookmarks.
@@ -249,7 +249,7 @@ Command shortcuts are remappable (Preferences); F6 provides pane navigation.
 
 ```
 pip install -e ".[dev]"
-pytest          # 363 tests, wx-free domain + guarded UI smoke
+pytest          # automated regression tests, wx-free domain + guarded UI smoke
 ruff check .
 ```
 

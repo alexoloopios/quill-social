@@ -525,6 +525,7 @@ class ComposerDialog(wx.Dialog):
             if recipients:
                 text = recipients + " " + text
         return Draft(
+            created=self._now,
             text=text,
             targets=self._selected_account_ids(),
             visibility=self.visibility.GetStringSelection() or "public",
